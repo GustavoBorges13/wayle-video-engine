@@ -78,7 +78,8 @@ class WayleEngineApp(Gtk.Window):
             "shared_monitors": True, "videos_path": str(Path.home() / "wallpapers/videos"), 
             "transition_delay": 2.0, "transition_type": "fade", "is_paused": False, 
             "fit_modes": {}, "fixed_wallpapers": {}, "playback_speed": 1.0, "brightness": 0,
-            "force_reload": False
+            "force_reload": False,
+            "hyde_integration": True, "startup_behavior": "restore" # NOVAS OPÇÕES
         }
         if SETTINGS_PATH.exists():
             try:
@@ -154,7 +155,6 @@ class WayleEngineApp(Gtk.Window):
         self.scale_interval.connect("value-changed", self.on_setting_changed_silent)
         self.sidebar_box.pack_start(self.scale_interval, False, False, 0)
 
-        # TRANSITION STYLE
         self.sidebar_box.pack_start(Gtk.Label(label="Transition Style:", xalign=0, margin_top=5), False, False, 0)
         self.combo_trans = Gtk.ComboBoxText()
         current_trans = self.settings.get("transition_type", "fade")
@@ -222,6 +222,31 @@ class WayleEngineApp(Gtk.Window):
 
         lbl = Gtk.Label(label="<span size='x-large' weight='bold'>System Configuration</span>", use_markup=True, xalign=0)
         vbox.pack_start(lbl, False, False, 0)
+
+        # === HYDE INTEGRATION SECTION ===
+        box_hyde = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box_hyde.pack_start(Gtk.Label(label="<b>✨ HyDE Project Integration</b>", use_markup=True, xalign=0), False, False, 0)
+        
+        row_hyde = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.sw_hyde = Gtk.Switch(active=self.settings.get("hyde_integration", True))
+        self.sw_hyde.connect("notify::active", self.on_setting_changed_silent)
+        row_hyde.pack_start(Gtk.Label(label="Enable 'hydectl' Sync (Generates Wallbash colors & saves state)", xalign=0), True, True, 0)
+        row_hyde.pack_start(self.sw_hyde, False, False, 0)
+        box_hyde.pack_start(row_hyde, False, False, 0)
+
+        row_startup = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.combo_startup = Gtk.ComboBoxText()
+        for opt in ["Restore Last Wallpaper", "Clear Screen (Black)"]: 
+            self.combo_startup.append_text(opt)
+        idx = 1 if self.settings.get("startup_behavior", "restore") == "clear" else 0
+        self.combo_startup.set_active(idx)
+        self.combo_startup.connect("changed", self.on_setting_changed_silent)
+        row_startup.pack_start(Gtk.Label(label="On System Login/Boot:", xalign=0), True, True, 0)
+        row_startup.pack_start(self.combo_startup, False, False, 0)
+        box_hyde.pack_start(row_startup, False, False, 0)
+
+        vbox.pack_start(box_hyde, False, False, 0)
+        # ================================
 
         def make_section(title, path_txt, btn_text, callback):
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
@@ -322,14 +347,15 @@ class WayleEngineApp(Gtk.Window):
             "fixed_wallpapers": self.settings.get("fixed_wallpapers", {}),
             "playback_speed": float(self.scale_speed.get_value()),
             "brightness": int(self.scale_bright.get_value()),
-            "force_reload": getattr(self, 'pending_reload', False)
+            "force_reload": getattr(self, 'pending_reload', False),
+            "hyde_integration": self.sw_hyde.get_active(),
+            "startup_behavior": "clear" if self.combo_startup.get_active() == 1 else "restore"
         }
         self.pending_reload = False
         
         with open(SETTINGS_PATH, "w") as f: json.dump(new_settings, f, indent=4)
         return False
 
-    # --- FILE & CACHE MANAGEMENT ---
     def clear_cache(self, btn):
         shutil.rmtree(THUMBS_DIR, ignore_errors=True)
         THUMBS_DIR.mkdir(parents=True, exist_ok=True)
@@ -348,7 +374,6 @@ class WayleEngineApp(Gtk.Window):
             self.refresh_gallery()
         dialog.destroy()
 
-    # --- ASYNC GALLERY ---
     def refresh_gallery(self):
         for child in self.flowbox.get_children(): self.flowbox.remove(child)
         self.loading_box.show_all()

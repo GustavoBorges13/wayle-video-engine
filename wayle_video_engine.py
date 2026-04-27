@@ -7,6 +7,7 @@ import json
 import signal
 import sys
 import threading
+import shutil
 from pathlib import Path
 import tomlkit
 
@@ -51,6 +52,8 @@ def load_settings():
         "playback_speed": 1.0,
         "brightness": 0,
         "force_reload": False,
+        "hyde_integration": True,
+        "startup_behavior": "restore"
     }
     if SETTINGS_PATH.exists():
         try:
@@ -130,6 +133,7 @@ def resolve_fit_mode(fit_preference, file_path, mon_name):
 def generate_thumbnail(file_path):
     thumb_path = THUMBS_DIR / f"{file_path.stem}.png"
     if not thumb_path.exists():
+        print(f"[DEBUG] Generating thumbnail for {file_path.name}...", flush=True)
         cmd = [
             "ffmpeg",
             "-y",
@@ -147,9 +151,7 @@ def generate_thumbnail(file_path):
     return thumb_path
 
 
-def update_wayle_toml(
-    monitor_file_dict, monitor_thumb_dict, cfg, force_transition=None
-):
+def update_wayle_toml(monitor_file_dict, monitor_thumb_dict, cfg, force_transition=None):
     try:
         with open(TOML_PATH, "r") as f:
             doc = tomlkit.load(f)
@@ -185,9 +187,10 @@ def kill_mpvpaper():
     os.system("killall -q mpvpaper")
 
 
-def start_mpvpaper(monitor_video_dict, cfg):
-    global mpvpaper_processes
-    kill_mpvpaper()
+# ================= FIX: AMBIENTE GLOBAL =================
+# Esta função garante que comandos como mpvpaper e hydectl 
+# rodem com as variáveis de ambiente corretas do Wayland/Hyprland
+def get_dynamic_env():
     dynamic_env = os.environ.copy()
     try:
         sys_env = subprocess.check_output(
@@ -197,8 +200,16 @@ def start_mpvpaper(monitor_video_dict, cfg):
             if "=" in line:
                 key, val = line.split("=", 1)
                 dynamic_env[key] = val
-    except:
-        pass
+    except Exception as e:
+        print(f"[DEBUG] Could not fetch systemd environment: {e}", flush=True)
+    return dynamic_env
+# ========================================================
+
+
+def start_mpvpaper(monitor_video_dict, cfg):
+    global mpvpaper_processes
+    kill_mpvpaper()
+    env = get_dynamic_env()
  
     for mon, file_path in monitor_video_dict.items():
         if is_video(file_path):
@@ -219,17 +230,56 @@ def start_mpvpaper(monitor_video_dict, cfg):
                     ["mpvpaper", "-o", mpv_options, mon, str(file_path)],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    env=dynamic_env,
+                    env=env,
                 )
                 mpvpaper_processes.append(proc)
             except Exception as e:
-                print(f"[!] Erro ao iniciar vídeo: {e}")
+                print(f"[ERROR] Failed to start mpvpaper: {e}", flush=True)
 
 
 def delayed_mpv_start(monitor_file_dict, cfg, expected_id):
     time.sleep(float(cfg["transition_delay"]))
     if current_transition_id == expected_id:
         start_mpvpaper(monitor_file_dict, cfg)
+
+def execute_hyde_integration(img_path, cfg):
+    """Executa o wallpaper.sh nativo do HyDE para gerar cache, cores e aplicar na tela."""
+    if not cfg.get("hyde_integration", True):
+        print("[DEBUG] HyDE integration is DISABLED in settings.", flush=True)
+        return
+
+    # Busca o executável raiz do HyDE (wallpaper.sh)
+    wall_sh = shutil.which("wallpaper.sh")
+    if not wall_sh:
+        fallback = Path.home() / ".local/lib/hyde/wallpaper.sh"
+        if fallback.exists():
+            wall_sh = str(fallback)
+
+    if not wall_sh:
+        print("[DEBUG] wallpaper.sh NOT FOUND in system. Skipping HyDE integration.", flush=True)
+        return
+
+    print(f"[DEBUG] HyDE wallpaper.sh detected! Injecting thumbnail...", flush=True)
+    env = get_dynamic_env()
+    
+    try:
+        # COMANDO MÁGICO DO HYDE:
+        # -s : Set specified wallpaper
+        # -b awww : Use awww backend
+        # -G : Set as global (Gera o cache do Wallbash e recarrega as cores do sistema)
+        cmd = [wall_sh, "-s", str(img_path), "-b", "awww", "-G"]
+        
+        print(f"[DEBUG] Executing: {' '.join(cmd)}", flush=True)
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            print(f"[ERROR] HyDE apply failed with exit code {result.returncode}!", flush=True)
+            print(f"[ERROR] STDOUT: {result.stdout}", flush=True)
+            print(f"[ERROR] STDERR: {result.stderr}", flush=True)
+        else:
+            print(f"[DEBUG] HyDE applied successfully! Colors, Cache, and Wallpaper updated.", flush=True)
+    except Exception as e:
+        print(f"[ERROR] Exception occurred while running HyDE integration: {e}", flush=True)
 
 
 def apply_wallpapers(monitor_file_dict, cfg):
@@ -248,6 +298,12 @@ def apply_wallpapers(monitor_file_dict, cfg):
         else:
             monitor_thumb_dict[mon] = file_path
 
+    # ======= INTEGRAÇÃO HYDE PROJECT =======
+    primary_img = list(monitor_thumb_dict.values())[0]
+    execute_hyde_integration(primary_img, cfg)
+    # =======================================
+
+    # Atualiza o TOML do Wayle
     update_wayle_toml(monitor_file_dict, monitor_thumb_dict, cfg)
 
     if has_video and not cfg["is_paused"]:
@@ -267,15 +323,31 @@ def handle_pause(cfg):
             paused_imgs[mon] = generate_thumbnail(file_path)
         else:
             paused_imgs[mon] = file_path
+            
+    # ======= INTEGRAÇÃO HYDE PROJECT =======
+    primary_img = list(paused_imgs.values())[0]
+    execute_hyde_integration(primary_img, cfg)
+    # =======================================
+
     update_wayle_toml(current_playing_dict, paused_imgs, cfg, force_transition="simple")
     kill_mpvpaper()
 
 
 def main_loop():
     global current_playing_dict
-    print("=== Wayle Video Engine Started ===")
+    print("=== Wayle Video Engine Started ===", flush=True)
 
     last_cfg = load_settings()
+    
+    # ======= COMPORTAMENTO DE STARTUP =======
+    if last_cfg.get("startup_behavior") == "clear":
+        print("[*] Clearing wallpaper on startup as requested...", flush=True)
+        os.system("swww clear")
+        os.system("awww clear")
+    else:
+        print("[*] Startup behavior: Restoring last wallpaper...", flush=True)
+    # ========================================
+
     was_paused = last_cfg["is_paused"]
     time_elapsed = last_cfg["interval_minutes"] * 60
     last_index = 0
@@ -399,6 +471,6 @@ def main_loop():
 
 
 if __name__ == "__main__":
-    time.sleep(5)
+    time.sleep(2)
     try: main_loop()
     except KeyboardInterrupt: kill_mpvpaper()
