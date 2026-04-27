@@ -118,6 +118,8 @@ def start_mpvpaper(monitor_video_dict, cfg):
     global mpvpaper_processes
     kill_mpvpaper()
     
+    env = os.environ.copy()
+    
     for mon, file_path in monitor_video_dict.items():
         if is_video(file_path):
             try:
@@ -132,10 +134,15 @@ def start_mpvpaper(monitor_video_dict, cfg):
                 brightness = cfg.get("brightness", 0)
                 mpv_options += f" --speed={speed} --brightness={brightness}"
                 
-                proc = subprocess.Popen(["mpvpaper", "-o", mpv_options, mon, str(file_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                proc = subprocess.Popen(
+                    ["mpvpaper", "-o", mpv_options, mon, str(file_path)], 
+                    stdout=subprocess.DEVNULL, 
+                    env=env
+                )
                 mpvpaper_processes.append(proc)
-            except: pass
-
+            except Exception as e:
+                print(f"[!] Error to initialize mpvpaper for {file_path}: {e}")
+                
 def delayed_mpv_start(monitor_file_dict, cfg, expected_id):
     time.sleep(float(cfg["transition_delay"]))
     if current_transition_id == expected_id:

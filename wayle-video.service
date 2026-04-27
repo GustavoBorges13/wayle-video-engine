@@ -3,6 +3,7 @@ Description=Wayle Video Wallpaper Engine (mpvpaper + awww)
 After=graphical-session.target wayland-session.target
 
 [Service]
+ExecStartPre=/usr/bin/sleep 3
 ExecStart=/usr/bin/python3 %h/.config/wayle/wayle_video_engine.py
 Restart=always
 RestartSec=3
