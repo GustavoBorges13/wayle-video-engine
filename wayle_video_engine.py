@@ -349,8 +349,13 @@ def main_loop():
     # ========================================
 
     was_paused = last_cfg["is_paused"]
-    time_elapsed = last_cfg["interval_minutes"] * 60
+    
+    # FIX: O tempo deve iniciar zerado para não pular o wallpaper no boot
+    time_elapsed = 0
     last_index = 0
+    
+    # Guarda o estado do ciclo para saber quando ele foi ativado/desativado
+    was_cycle_enabled = last_cfg["cycle_enabled"]
 
     while True:
         try:
@@ -363,6 +368,12 @@ def main_loop():
             if not files:
                 time.sleep(1)
                 continue
+
+            # FIX: Zera o cronômetro se o usuário acabou de ativar o Ciclo na interface
+            if cfg["cycle_enabled"] and not was_cycle_enabled:
+                print("[DEBUG] Cycle enabled! Resetting timer...", flush=True)
+                time_elapsed = 0
+            was_cycle_enabled = cfg["cycle_enabled"]
 
             if not current_playing_dict:
                 monitor_file_dict = {}
@@ -463,12 +474,12 @@ def main_loop():
             last_cfg = cfg
             time.sleep(1)
 
-            if not cfg["is_paused"]:
+            # Só avança o cronômetro se o vídeo não estiver pausado e o ciclo estiver ativo
+            if not cfg["is_paused"] and cfg["cycle_enabled"]:
                 time_elapsed += 1
 
         except Exception as e:
             time.sleep(2)
-
 
 if __name__ == "__main__":
     time.sleep(2)
