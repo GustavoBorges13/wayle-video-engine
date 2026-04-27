@@ -4,7 +4,19 @@ An advanced animated wallpaper manager (Videos, GIFs, and Images) featuring a na
 
 Designed with **HyDE Project** users in mind, it leverages `awww` for smooth transitions and optimally injects `mpvpaper` under the hood.
 
-![Interface Screenshot](replace_with_your_screenshot_link.jpg)
+## 🎥 Demonstrations & Performance
+
+**Video 1:** Testing `.mp4` video wallpaper changes (powered by `mpvpaper`).
+
+https://github.com/user-attachments/assets/c735c6bf-0a44-4ffd-992a-f699002a6953
+
+**Video 2:** Testing static images and `.gif` wallpaper changes (handled natively by `awww`).
+
+https://github.com/user-attachments/assets/3cb023e5-803c-4c46-9796-49fbe1e2f90e
+
+> **📈 The Result:** As shown in the resource monitoring terminal, `mpvpaper` only consumes hardware resources when a video is actively playing. `awww` acts as a lightweight background fallback engine—handling beautiful transition animations and taking over entirely if you switch to a static image or GIF.  
+> 
+> **Note:** When switching to a video wallpaper, the engine automatically generates a high-quality thumbnail of the first frame. This thumbnail is fed to `awww` to perform a smooth transition *before* `mpvpaper` seamlessly takes over the screen. This ensures a flawless visual experience without wasting CPU/GPU resources.
 
 ## ✨ Key Features
 * **Eco RAM (Pause):** Instantly pauses videos and transitions to a static high-quality frame, killing the `mpvpaper` process to save 100% of CPU/GPU resources while you game or work.
