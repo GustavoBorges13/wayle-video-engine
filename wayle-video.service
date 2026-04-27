@@ -3,7 +3,7 @@ Description=Wayle Video Wallpaper Engine (mpvpaper + awww)
 After=graphical-session.target wayland-session.target
 
 [Service]
-ExecStartPre=/usr/bin/sleep 3
+ExecStartPre=/bin/bash -c 'while [ -z "$(systemctl --user show-environment | grep WAYLAND_DISPLAY)" ]; do sleep 1; done'
 ExecStart=/usr/bin/python3 %h/.config/wayle/wayle_video_engine.py
 Restart=always
 RestartSec=3
