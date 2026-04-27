@@ -10,12 +10,12 @@ import tomlkit
 import threading
 import shutil
 
-# ================= PATHS =================
 TOML_PATH = Path.home() / ".config/wayle/runtime.toml"
 SETTINGS_PATH = Path.home() / ".config/wayle/video_engine_settings.json"
 CACHE_DIR = Path.home() / ".cache" / "wayle_video_engine"
 THUMBS_DIR = CACHE_DIR / "thumbs"
 SUPPORTED = [".mp4", ".mkv", ".webm", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif"]
+TRANSITIONS = ["none", "simple", "fade", "left", "right", "top", "bottom", "wipe", "wave", "grow", "center", "any", "random", "outer"]
 
 THUMBS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -25,15 +25,13 @@ class WayleEngineApp(Gtk.Window):
         self.set_default_size(1200, 750)
         self.set_position(Gtk.WindowPosition.CENTER)
 
-        # Control Variables
         self.is_loading_ui = True
         self.save_timer = None
-        self.pending_reload = False # Controls if daemon restart is needed
+        self.pending_reload = False 
         self.settings = self.load_settings()
         self.videos_dir = Path(self.settings["videos_path"])
         self.monitors = self.get_monitors_from_toml()
 
-        # HeaderBar
         self.header = Gtk.HeaderBar()
         self.header.set_show_close_button(True)
         self.header.set_title("Wayle Video Engine")
@@ -43,11 +41,9 @@ class WayleEngineApp(Gtk.Window):
         self.btn_config.connect("clicked", self.toggle_view)
         self.header.pack_end(self.btn_config)
 
-        # Main Layout (Paned to split Sidebar and Main Area)
         self.paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         self.add(self.paned)
 
-        # Sidebar
         self.sidebar_scrolled = Gtk.ScrolledWindow()
         self.sidebar_scrolled.set_size_request(320, -1)
         self.sidebar_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -59,7 +55,6 @@ class WayleEngineApp(Gtk.Window):
         self.sidebar_scrolled.add(self.sidebar_box)
         self.paned.pack1(self.sidebar_scrolled, False, False)
 
-        # Main Area (Stack to toggle between Gallery and Configs)
         self.stack = Gtk.Stack()
         self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
         self.paned.pack2(self.stack, True, False)
@@ -82,7 +77,8 @@ class WayleEngineApp(Gtk.Window):
             "cycle_enabled": True, "interval_minutes": 5, "cycle_mode": "shuffle", "mute": True, 
             "shared_monitors": True, "videos_path": str(Path.home() / "wallpapers/videos"), 
             "transition_delay": 2.0, "transition_type": "fade", "is_paused": False, 
-            "fit_modes": {}, "fixed_wallpapers": {}, "playback_speed": 1.0, "brightness": 0
+            "fit_modes": {}, "fixed_wallpapers": {}, "playback_speed": 1.0, "brightness": 0,
+            "force_reload": False
         }
         if SETTINGS_PATH.exists():
             try:
@@ -104,69 +100,68 @@ class WayleEngineApp(Gtk.Window):
 
     # ================= SIDEBAR =================
     def create_sidebar(self):
-        # --- Monitors ---
         self.create_title("🖥️ Displays & Layout")
         
         self.sw_shared = Gtk.Switch(active=self.settings["shared_monitors"])
-        self.sw_shared.connect("notify::active", self.on_setting_changed_silent) # Silent
+        self.sw_shared.connect("notify::active", self.on_setting_changed_silent)
         self.sw_shared.connect("notify::active", self.update_target_selector)
         self.create_row("Link Displays", self.sw_shared)
 
         self.sidebar_box.pack_start(Gtk.Label(label="Scaling Mode:", xalign=0, margin_top=5), False, False, 0)
-        
         self.combo_fit = Gtk.ComboBoxText()
         for opt in ["fill", "fit", "auto"]: self.combo_fit.append_text(opt)
         self.combo_fit.set_active(["fill", "fit", "auto"].index(self.settings.get("fit_modes", {}).get(self.monitors[0], "fill")))
-        self.combo_fit.connect("changed", self.on_fit_change) # Visual (Reload)
+        self.combo_fit.connect("changed", self.on_fit_change)
         self.sidebar_box.pack_start(self.combo_fit, False, False, 0)
 
-        # --- Video Engine ---
         self.create_title("🎛️ Video Engine (Mpv)")
         
         self.sw_pause = Gtk.Switch(active=self.settings["is_paused"])
-        self.sw_pause.connect("notify::active", self.on_setting_changed_silent) # Silent (Daemon handles natively)
+        self.sw_pause.connect("notify::active", self.on_setting_changed_silent)
         self.create_row("Pause (Eco RAM)", self.sw_pause)
 
         self.sw_mute = Gtk.Switch(active=self.settings["mute"])
-        self.sw_mute.connect("notify::active", self.on_setting_changed_reload) # Visual
+        self.sw_mute.connect("notify::active", self.on_setting_changed_silent) 
         self.create_row("Mute Audio", self.sw_mute)
 
         self.sidebar_box.pack_start(Gtk.Label(label="Playback Speed:", xalign=0, margin_top=5), False, False, 0)
         self.scale_speed = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.25, 2.0, 0.25)
         self.scale_speed.set_value(self.settings["playback_speed"])
-        self.scale_speed.connect("value-changed", self.on_setting_changed_reload) # Visual
+        self.scale_speed.connect("value-changed", self.on_setting_changed_silent) 
         self.sidebar_box.pack_start(self.scale_speed, False, False, 0)
 
         self.sidebar_box.pack_start(Gtk.Label(label="Brightness:", xalign=0, margin_top=5), False, False, 0)
         self.scale_bright = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, -50, 50, 5)
         self.scale_bright.set_value(self.settings["brightness"])
-        self.scale_bright.connect("value-changed", self.on_setting_changed_reload) # Visual
+        self.scale_bright.connect("value-changed", self.on_setting_changed_silent) 
         self.sidebar_box.pack_start(self.scale_bright, False, False, 0)
 
-        # --- Cycle ---
         self.create_title("🔄 Cycle & Transition")
 
         self.sw_cycle = Gtk.Switch(active=self.settings["cycle_enabled"])
-        self.sw_cycle.connect("notify::active", self.on_setting_changed_silent) # Silent
+        self.sw_cycle.connect("notify::active", self.on_setting_changed_silent)
         self.create_row("Enable Cycle", self.sw_cycle)
 
         self.combo_mode = Gtk.ComboBoxText()
         for opt in ["shuffle", "sequential"]: self.combo_mode.append_text(opt)
         self.combo_mode.set_active(["shuffle", "sequential"].index(self.settings["cycle_mode"]))
-        self.combo_mode.connect("changed", self.on_setting_changed_silent) # Silent
+        self.combo_mode.connect("changed", self.on_setting_changed_silent)
         self.sidebar_box.pack_start(self.combo_mode, False, False, 0)
 
         self.sidebar_box.pack_start(Gtk.Label(label="Interval (Minutes):", xalign=0, margin_top=5), False, False, 0)
         self.scale_interval = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 1, 60, 1)
         self.scale_interval.set_value(self.settings["interval_minutes"])
-        self.scale_interval.connect("value-changed", self.on_setting_changed_silent) # Silent
+        self.scale_interval.connect("value-changed", self.on_setting_changed_silent)
         self.sidebar_box.pack_start(self.scale_interval, False, False, 0)
 
+        # TRANSITION STYLE
         self.sidebar_box.pack_start(Gtk.Label(label="Transition Style:", xalign=0, margin_top=5), False, False, 0)
         self.combo_trans = Gtk.ComboBoxText()
-        for opt in ["fade", "simple", "wipe", "grow", "center", "random"]: self.combo_trans.append_text(opt)
-        self.combo_trans.set_active(["fade", "simple", "wipe", "grow", "center", "random"].index(self.settings["transition_type"]))
-        self.combo_trans.connect("changed", self.on_setting_changed_silent) # Silent
+        current_trans = self.settings.get("transition_type", "fade")
+        if current_trans not in TRANSITIONS: current_trans = "fade"
+        for opt in TRANSITIONS: self.combo_trans.append_text(opt)
+        self.combo_trans.set_active(TRANSITIONS.index(current_trans))
+        self.combo_trans.connect("changed", self.on_setting_changed_silent) 
         self.sidebar_box.pack_start(self.combo_trans, False, False, 0)
 
     # ================= MAIN AREA =================
@@ -294,30 +289,22 @@ class WayleEngineApp(Gtk.Window):
         except: self.combo_fit.set_active(0)
         self.is_loading_ui = False
 
-    # --- AUTO-SAVE FUNCTIONS ---
-    def on_setting_changed_silent(self, *args):
-        """Saves config without restarting the video"""
-        if self.is_loading_ui: return
-        self.trigger_save(needs_reload=False)
-
-    def on_setting_changed_reload(self, *args):
-        """Saves config and triggers daemon restart"""
-        if self.is_loading_ui: return
-        self.trigger_save(needs_reload=True)
-
     def on_fit_change(self, combo):
         if self.is_loading_ui: return
         target = self.get_active_target()
         val = combo.get_active_text()
         if "fit_modes" not in self.settings: self.settings["fit_modes"] = {}
         self.settings["fit_modes"][target] = val
-        self.trigger_save(needs_reload=True)
+        self.trigger_save() 
+
+    def on_setting_changed_silent(self, *args):
+        if self.is_loading_ui: return
+        self.trigger_save(needs_reload=False)
 
     def trigger_save(self, needs_reload=False):
-        if needs_reload:
-            self.pending_reload = True
+        if needs_reload: self.pending_reload = True
         if self.save_timer: GLib.source_remove(self.save_timer)
-        self.save_timer = GLib.timeout_add(500, self.do_save_and_apply) # 0.5s Debounce
+        self.save_timer = GLib.timeout_add(500, self.do_save_and_apply)
 
     def do_save_and_apply(self):
         self.save_timer = None
@@ -334,14 +321,12 @@ class WayleEngineApp(Gtk.Window):
             "fit_modes": self.settings.get("fit_modes", {}),
             "fixed_wallpapers": self.settings.get("fixed_wallpapers", {}),
             "playback_speed": float(self.scale_speed.get_value()),
-            "brightness": int(self.scale_bright.get_value())
+            "brightness": int(self.scale_bright.get_value()),
+            "force_reload": getattr(self, 'pending_reload', False)
         }
-        with open(SETTINGS_PATH, "w") as f: json.dump(new_settings, f, indent=4)
+        self.pending_reload = False
         
-        if self.pending_reload:
-            os.system("systemctl --user restart wayle-video.service")
-            self.pending_reload = False
-            
+        with open(SETTINGS_PATH, "w") as f: json.dump(new_settings, f, indent=4)
         return False
 
     # --- FILE & CACHE MANAGEMENT ---
@@ -358,7 +343,7 @@ class WayleEngineApp(Gtk.Window):
         if dialog.run() == Gtk.ResponseType.OK:
             self.videos_dir = Path(dialog.get_filename())
             self.lbl_folder.set_label(str(self.videos_dir))
-            self.trigger_save(needs_reload=True)
+            self.trigger_save()
             self.toggle_view(None)
             self.refresh_gallery()
         dialog.destroy()
@@ -381,11 +366,7 @@ class WayleEngineApp(Gtk.Window):
             GLib.idle_add(self.loading_label.set_label, f"Generating {len(missing)} High-Quality thumbnails...")
             for f in missing:
                 t = THUMBS_DIR / f"{f.stem}.png"
-                cmd = [
-                    "ffmpeg", "-y", "-i", str(f),
-                    "-ss", "00:00:00.000", "-vframes", "1",
-                    "-q:v", "2", str(t)
-                ]
+                cmd = ["ffmpeg", "-y", "-i", str(f), "-ss", "00:00:00.000", "-vframes", "1", "-q:v", "2", str(t)]
                 subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
         GLib.idle_add(self.draw_gallery, files)
@@ -435,12 +416,8 @@ class WayleEngineApp(Gtk.Window):
         if self.sw_shared.get_active(): fixed["all"] = file_path
         else: fixed[active_target] = file_path
 
-        self.is_loading_ui = True
-        self.sw_cycle.set_active(False)
-        self.is_loading_ui = False
-        
         self.settings["fixed_wallpapers"] = fixed
-        self.trigger_save(needs_reload=True)
+        self.trigger_save(needs_reload=True) 
 
 if __name__ == "__main__":
     app = WayleEngineApp()

@@ -4,6 +4,9 @@ import time
 import random
 import subprocess
 import json
+import signal
+import sys
+import threading
 from pathlib import Path
 import tomlkit
 
@@ -20,19 +23,33 @@ ALL_SUPPORTED = SUPPORTED_VIDEOS + SUPPORTED_IMAGES
 
 THUMBS_DIR.mkdir(parents=True, exist_ok=True)
 current_playing_dict = {}
+mpvpaper_processes = []
+current_transition_id = 0 
+
+def sig_handler(signum, frame):
+    kill_mpvpaper()
+    sys.exit(0)
+signal.signal(signal.SIGTERM, sig_handler)
 
 def load_settings():
     default = {
         "cycle_enabled": True, "interval_minutes": 5, "cycle_mode": "shuffle", 
         "mute": True, "shared_monitors": True, "videos_path": str(DEFAULT_VIDEOS_DIR), 
         "transition_delay": 2.0, "transition_type": "fade", "is_paused": False, 
-        "fit_modes": {}, "fixed_wallpapers": {}, "playback_speed": 1.0, "brightness": 0
+        "fit_modes": {}, "fixed_wallpapers": {}, "playback_speed": 1.0, "brightness": 0,
+        "force_reload": False
     }
     if SETTINGS_PATH.exists():
         try:
             with open(SETTINGS_PATH, "r") as f: return {**default, **json.load(f)}
         except: pass
     return default
+
+def clear_flags(cfg):
+    cfg["force_reload"] = False
+    try:
+        with open(SETTINGS_PATH, "w") as f: json.dump(cfg, f, indent=4)
+    except: pass
 
 def get_monitors_from_toml():
     try:
@@ -41,7 +58,6 @@ def get_monitors_from_toml():
     except: return ["DP-3", "HDMI-A-1"]
 
 MONITORS = get_monitors_from_toml()
-
 def is_video(file_path): return Path(file_path).suffix.lower() in SUPPORTED_VIDEOS
 
 def get_monitor_aspect(mon_name):
@@ -69,11 +85,7 @@ def resolve_fit_mode(fit_preference, file_path, mon_name):
 def generate_thumbnail(file_path):
     thumb_path = THUMBS_DIR / f"{file_path.stem}.png"
     if not thumb_path.exists():
-        cmd = [
-            "ffmpeg", "-y", "-i", str(file_path),
-            "-ss", "00:00:00.000", "-vframes", "1",
-            "-q:v", "2", str(thumb_path)
-        ]
+        cmd = ["ffmpeg", "-y", "-i", str(file_path), "-ss", "00:00:00.000", "-vframes", "1", "-q:v", "2", str(thumb_path)]
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return thumb_path
 
@@ -87,54 +99,72 @@ def update_wayle_toml(monitor_file_dict, monitor_thumb_dict, cfg, force_transiti
             for m in doc["wallpaper"]["monitors"]:
                 mon_name = m["name"]
                 if mon_name in monitor_thumb_dict:
-                    pref = cfg["fit_modes"].get(mon_name, "fill") # Fill as native default
+                    pref = cfg["fit_modes"].get(mon_name, "fill")
                     m["fit-mode"] = resolve_fit_mode(pref, monitor_file_dict[mon_name], mon_name)
                     m["wallpaper"] = str(monitor_thumb_dict[mon_name])
                 
         with open(TOML_PATH, "w") as f: tomlkit.dump(doc, f)
-    except Exception as e: print(f"[!] TOML Error: {e}")
+    except: pass
 
 def kill_mpvpaper():
+    global mpvpaper_processes
+    for proc in mpvpaper_processes:
+        try: proc.terminate()
+        except: pass
+    mpvpaper_processes = []
     os.system("killall -q mpvpaper")
-    time.sleep(0.2)
 
 def start_mpvpaper(monitor_video_dict, cfg):
+    global mpvpaper_processes
     kill_mpvpaper()
+    
     for mon, file_path in monitor_video_dict.items():
         if is_video(file_path):
-            audio_flag = "no-audio" if cfg["mute"] else ""
-            pref = cfg["fit_modes"].get(mon, "fill")
-            actual_mode = resolve_fit_mode(pref, file_path, mon)
-            
-            mpv_options = f"loop {audio_flag}"
-            if actual_mode == "fill": mpv_options += " --panscan=1.0"
-            
-            # Add MPV Speed and Brightness options
-            speed = cfg.get("playback_speed", 1.0)
-            brightness = cfg.get("brightness", 0)
-            mpv_options += f" --speed={speed} --brightness={brightness}"
-            
-            subprocess.Popen(["mpvpaper", "-o", mpv_options, mon, str(file_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                audio_flag = "no-audio" if cfg["mute"] else ""
+                pref = cfg["fit_modes"].get(mon, "fill")
+                actual_mode = resolve_fit_mode(pref, file_path, mon)
+                
+                mpv_options = f"loop {audio_flag} --hwdec=auto"
+                if actual_mode == "fill": mpv_options += " --panscan=1.0"
+                
+                speed = cfg.get("playback_speed", 1.0)
+                brightness = cfg.get("brightness", 0)
+                mpv_options += f" --speed={speed} --brightness={brightness}"
+                
+                proc = subprocess.Popen(["mpvpaper", "-o", mpv_options, mon, str(file_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                mpvpaper_processes.append(proc)
+            except: pass
+
+def delayed_mpv_start(monitor_file_dict, cfg, expected_id):
+    time.sleep(float(cfg["transition_delay"]))
+    if current_transition_id == expected_id:
+        start_mpvpaper(monitor_file_dict, cfg)
 
 def apply_wallpapers(monitor_file_dict, cfg):
-    global current_playing_dict
+    global current_playing_dict, current_transition_id
     current_playing_dict = monitor_file_dict
     monitor_thumb_dict = {}
     has_video = False
+    
+    current_transition_id = time.time()
+    kill_mpvpaper() 
     
     for mon, file_path in monitor_file_dict.items():
         if is_video(file_path):
             monitor_thumb_dict[mon] = generate_thumbnail(file_path)
             has_video = True
-        else: monitor_thumb_dict[mon] = file_path
+        else:
+            monitor_thumb_dict[mon] = file_path
             
     update_wayle_toml(monitor_file_dict, monitor_thumb_dict, cfg)
-    if has_video:
-        time.sleep(float(cfg["transition_delay"]))
-        start_mpvpaper(monitor_file_dict, cfg)
-    else: kill_mpvpaper()
+    
+    if has_video and not cfg["is_paused"]:
+        threading.Thread(target=delayed_mpv_start, args=(monitor_file_dict, cfg, current_transition_id), daemon=True).start()
 
 def handle_pause(cfg):
+    global current_transition_id
+    current_transition_id = time.time() 
     paused_imgs = {}
     for mon, file_path in current_playing_dict.items():
         if is_video(file_path): paused_imgs[mon] = generate_thumbnail(file_path)
@@ -148,31 +178,74 @@ def main_loop():
     
     last_cfg = load_settings()
     was_paused = last_cfg["is_paused"]
-    time_elapsed = 0
+    time_elapsed = last_cfg["interval_minutes"] * 60
     last_index = 0
     
     while True:
-        cfg = load_settings()
-        videos_dir = Path(cfg["videos_path"])
-        files = [f for f in videos_dir.glob("*.*") if f.suffix.lower() in ALL_SUPPORTED]
-        
-        if cfg["is_paused"] and not was_paused: handle_pause(cfg); was_paused = True
-        elif not cfg["is_paused"] and was_paused: apply_wallpapers(current_playing_dict, cfg); was_paused = False
+        try:
+            cfg = load_settings()
+            videos_dir = Path(cfg["videos_path"])
+            files = [f for f in videos_dir.glob("*.*") if f.suffix.lower() in ALL_SUPPORTED]
+            
+            if not files:
+                time.sleep(1)
+                continue
 
-        if cfg["is_paused"] or not files:
-            time.sleep(1)
-            continue
-
-        if time_elapsed >= (cfg["interval_minutes"] * 60) or not current_playing_dict:
-            time_elapsed = 0
-            monitor_file_dict = {}
-            if not cfg["cycle_enabled"]:
+            # 1. INIT
+            if not current_playing_dict:
+                monitor_file_dict = {}
                 if cfg["shared_monitors"]:
                     vid = Path(cfg["fixed_wallpapers"].get("all", files[0]))
                     for m in MONITORS: monitor_file_dict[m] = vid
                 else:
                     for m in MONITORS: monitor_file_dict[m] = Path(cfg["fixed_wallpapers"].get(m, files[0]))
-            else:
+                
+                if cfg["is_paused"]:
+                    current_playing_dict = monitor_file_dict
+                    handle_pause(cfg)
+                else:
+                    apply_wallpapers(monitor_file_dict, cfg)
+
+            # 2. PAUSE BOTÃO
+            if cfg["is_paused"] and not was_paused:
+                handle_pause(cfg)
+                was_paused = True
+            elif not cfg["is_paused"] and was_paused:
+                apply_wallpapers(current_playing_dict, cfg)
+                was_paused = False
+
+            # 3. VERIFICAÇÃO DA GUI (Cliques e Ajustes Visuais)
+            needs_visual_reload = False
+            
+            if cfg.get("force_reload", False):
+                needs_visual_reload = True
+                clear_flags(cfg)
+                time_elapsed = 0 
+                
+            elif (cfg["fit_modes"] != last_cfg.get("fit_modes", {}) or
+                  cfg["playback_speed"] != last_cfg.get("playback_speed") or
+                  cfg["brightness"] != last_cfg.get("brightness") or
+                  cfg["mute"] != last_cfg.get("mute") or
+                  cfg["fixed_wallpapers"] != last_cfg.get("fixed_wallpapers", {})): 
+                  needs_visual_reload = True
+
+            if needs_visual_reload:
+                monitor_file_dict = {}
+                if cfg["shared_monitors"]:
+                    vid = Path(cfg["fixed_wallpapers"].get("all", files[0]))
+                    for m in MONITORS: monitor_file_dict[m] = vid
+                else:
+                    for m in MONITORS: monitor_file_dict[m] = Path(cfg["fixed_wallpapers"].get(m, files[0]))
+                
+                if cfg["is_paused"]:
+                    current_playing_dict = monitor_file_dict
+                    handle_pause(cfg)
+                else:
+                    apply_wallpapers(monitor_file_dict, cfg)
+
+            # 4. CICLO AUTOMÁTICO
+            if not cfg["is_paused"] and cfg["cycle_enabled"] and time_elapsed >= (cfg["interval_minutes"] * 60):
+                monitor_file_dict = {}
                 if cfg["shared_monitors"]:
                     if cfg["cycle_mode"] == "shuffle": vid = random.choice(files)
                     else:
@@ -183,10 +256,28 @@ def main_loop():
                 else:
                     for m in MONITORS: monitor_file_dict[m] = random.choice(files)
 
-            if monitor_file_dict != current_playing_dict: apply_wallpapers(monitor_file_dict, cfg)
+                if monitor_file_dict != current_playing_dict:
+                    
+                    fixed = cfg.get("fixed_wallpapers", {})
+                    if cfg["shared_monitors"]: fixed["all"] = str(monitor_file_dict[MONITORS[0]])
+                    else:
+                        for m in MONITORS: fixed[m] = str(monitor_file_dict[m])
+                    cfg["fixed_wallpapers"] = fixed
+                    try:
+                        with open(SETTINGS_PATH, "w") as f: json.dump(cfg, f, indent=4)
+                    except: pass
+                    
+                    apply_wallpapers(monitor_file_dict, cfg)
+                time_elapsed = 0
 
-        time.sleep(1)
-        time_elapsed += 1
+            last_cfg = cfg
+            time.sleep(1)
+            
+            if not cfg["is_paused"]:
+                time_elapsed += 1
+                
+        except Exception as e:
+            time.sleep(2)
 
 if __name__ == "__main__":
     try: main_loop()
