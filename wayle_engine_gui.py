@@ -9,11 +9,14 @@ from pathlib import Path
 import tomlkit
 import threading
 import shutil
+import fcntl
+import sys
 
 TOML_PATH = Path.home() / ".config/wayle/runtime.toml"
 SETTINGS_PATH = Path.home() / ".config/wayle/video_engine_settings.json"
 CACHE_DIR = Path.home() / ".cache" / "wayle_video_engine"
 THUMBS_DIR = CACHE_DIR / "thumbs"
+LOCK_FILE = CACHE_DIR / "gui.lock"
 
 VIDEO_EXTS = [".mp4", ".mkv", ".webm", ".avi", ".mov", ".flv"]
 GIF_EXTS = [".gif"]
@@ -21,9 +24,19 @@ IMAGE_EXTS = [".png", ".jpg", ".jpeg", ".webp", ".avif", ".bmp", ".svg", ".tga",
 SUPPORTED = VIDEO_EXTS + GIF_EXTS + IMAGE_EXTS
 
 TRANSITIONS = ["none", "simple", "fade", "left", "right", "top", "bottom", "wipe", "wave", "grow", "center", "any", "random", "outer"]
-FILTERS = ["All Wallpapers", "Videos 🎬", "Images 🖼️", "GIFs 🎞️"]
+FILTERS = ["All Wallpapers", "Favorites ❤️", "Videos 🎬", "Images 🖼️", "GIFs 🎞️"]
 
 THUMBS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Ensures only one instance of the GUI is running
+def acquire_single_instance_lock():
+    try:
+        global lock_fd
+        lock_fd = open(LOCK_FILE, 'w')
+        fcntl.lockf(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("[!] Another instance is already running. Exiting...")
+        sys.exit(0)
 
 class WayleEngineApp(Gtk.Window):
     def __init__(self):
@@ -31,9 +44,12 @@ class WayleEngineApp(Gtk.Window):
         self.set_default_size(1200, 750)
         self.set_position(Gtk.WindowPosition.CENTER)
 
+        self.apply_custom_css()
+
         self.is_loading_ui = True
         self.save_timer = None
         self.pending_reload = False 
+        self.wallpapers_dirty = False 
         
         self.settings = self.load_settings()
         self.current_filter = self.settings.get("active_filter", "All Wallpapers")
@@ -74,6 +90,40 @@ class WayleEngineApp(Gtk.Window):
         self.is_loading_ui = False
         self.refresh_gallery()
 
+    def apply_custom_css(self):
+        css = b"""
+        button.fav-btn {
+            background: transparent;
+            background-color: transparent;
+            background-image: none;
+            border: none;
+            box-shadow: none;
+            text-shadow: 0px 0px 5px rgba(0, 0, 0, 1.0);
+            padding: 2px;
+        }
+        button.fav-btn:hover {
+            background: transparent;
+            background-color: transparent;
+            background-image: none;
+            border: none;
+            box-shadow: none;
+        }
+        button.fav-btn:active {
+            background: transparent;
+            background-color: transparent;
+            background-image: none;
+            border: none;
+            box-shadow: none;
+        }
+        """
+        style_provider = Gtk.CssProvider()
+        style_provider.load_from_data(css)
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(),
+            style_provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
     def get_monitors_from_toml(self):
         try:
             with open(TOML_PATH, "r") as f: doc = tomlkit.load(f)
@@ -87,7 +137,7 @@ class WayleEngineApp(Gtk.Window):
             "transition_delay": 2.0, "transition_type": "fade", "is_paused": False, 
             "fit_modes": {}, "fixed_wallpapers": {}, "playback_speed": 1.0, "brightness": 0,
             "force_reload": False, "active_filter": "All Wallpapers",
-            "hyde_integration": True, "startup_behavior": "restore"
+            "hyde_integration": True, "startup_behavior": "restore", "favorites": []
         }
         if SETTINGS_PATH.exists():
             try:
@@ -96,7 +146,7 @@ class WayleEngineApp(Gtk.Window):
         return dict(self.default_settings)
 
     def block_scroll(self, widget, event):
-        return True # Evita que a rodinha do mouse mude os valores acidentalmente
+        return True
 
     def create_title(self, text):
         lbl = Gtk.Label(xalign=0)
@@ -104,7 +154,6 @@ class WayleEngineApp(Gtk.Window):
         lbl.set_markup(f"<b>{text}</b>")
         self.sidebar_box.pack_start(lbl, False, False, 0)
 
-    # Cria Switch (Ativar/Desativar) - Refresh fica na direita do Switch
     def create_row(self, label_text, widget, default_val=None):
         widget.connect("scroll-event", self.block_scroll)
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -117,21 +166,17 @@ class WayleEngineApp(Gtk.Window):
             btn_reset = Gtk.Button.new_from_icon_name("view-refresh-symbolic", Gtk.IconSize.MENU)
             btn_reset.set_relief(Gtk.ReliefStyle.NONE)
             btn_reset.set_tooltip_text("Restore default")
-            btn_reset.set_no_show_all(True) # Impede que seja exibido logo de cara se for igual ao default
+            btn_reset.set_no_show_all(True)
             btn_reset.connect("clicked", lambda b: widget.set_active(default_val))
             
-            # Checa se o valor difere do padrão para mostrar o botão
-            def check_diff(w, param):
-                btn_reset.set_visible(w.get_active() != default_val)
-            
+            def check_diff(w, param): btn_reset.set_visible(w.get_active() != default_val)
             widget.connect("notify::active", check_diff)
-            check_diff(widget, None) # Verifica inicial
+            check_diff(widget, None)
 
             box.pack_start(btn_reset, False, False, 0)
             
         self.sidebar_box.pack_start(box, False, False, 0)
 
-    # Cria Sliders e Combos - Refresh fica na direita
     def add_sidebar_control(self, label_text, widget, default_val=None, is_combo=False):
         widget.connect("scroll-event", self.block_scroll)
         lbl = Gtk.Label(label=label_text, xalign=0, margin_top=5)
@@ -221,11 +266,6 @@ class WayleEngineApp(Gtk.Window):
         self.combo_trans.connect("changed", self.on_setting_changed_silent) 
         self.add_sidebar_control("Transition Style:", self.combo_trans, TRANSITIONS.index(self.default_settings["transition_type"]), is_combo=True)
 
-        self.scale_delay = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.1, 5.0, 0.1)
-        self.scale_delay.set_value(float(self.settings.get("transition_delay", 2.0)))
-        self.scale_delay.connect("value-changed", self.on_setting_changed_silent)
-        self.add_sidebar_control("Video Start Delay (s):", self.scale_delay, self.default_settings["transition_delay"])
-
     # ================= MAIN AREA =================
     def create_gallery_view(self):
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -254,12 +294,11 @@ class WayleEngineApp(Gtk.Window):
         self.combo_filter.connect("changed", self.on_filter_changed)
         filter_box.pack_start(self.combo_filter, False, False, 0)
 
-        # Indicador de Carregamento da Barra Superior (Mini Spinner)
         self.top_loading_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
         self.top_spinner = Gtk.Spinner()
         self.top_loading_box.pack_start(self.top_spinner, False, False, 0)
         self.top_loading_box.pack_start(Gtk.Label(label="Processing..."), False, False, 0)
-        self.top_loading_box.set_no_show_all(True) # Fica invisível até ser chamado
+        self.top_loading_box.set_no_show_all(True)
 
         top_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         top_bar.set_margin_top(10)
@@ -268,9 +307,9 @@ class WayleEngineApp(Gtk.Window):
         top_bar.set_margin_end(10)
         
         top_bar.pack_start(self.target_box, False, False, 0)
-        top_bar.pack_start(Gtk.Label(), True, True, 0) # Espaçador 1
-        top_bar.pack_start(self.top_loading_box, False, False, 0) # Spinner no Meio
-        top_bar.pack_start(Gtk.Label(), True, True, 0) # Espaçador 2
+        top_bar.pack_start(Gtk.Label(), True, True, 0) 
+        top_bar.pack_start(self.top_loading_box, False, False, 0) 
+        top_bar.pack_start(Gtk.Label(), True, True, 0) 
         top_bar.pack_start(filter_box, False, False, 0)
 
         vbox.pack_start(top_bar, False, False, 0)
@@ -372,18 +411,15 @@ class WayleEngineApp(Gtk.Window):
         box3.pack_start(Gtk.Label(label=str(SETTINGS_PATH), xalign=0), False, False, 0)
         vbox.pack_start(box3, False, False, 0)
         
-        # Link do Repositório GitHub
         box_git = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         lbl_g = Gtk.Label(xalign=0)
         lbl_g.set_markup("<b>🌟 Support the Project</b>")
         box_git.pack_start(lbl_g, False, False, 0)
-        # OBS: Você pode alterar esta URL para o link real do seu repositório Wayle no GitHub
         btn_git = Gtk.LinkButton(uri="https://github.com/GustavoBorges13/wayle-video-engine", label="⭐ Star Wayle on GitHub")
         btn_git.set_halign(Gtk.Align.START)
         box_git.pack_start(btn_git, False, False, 0)
         vbox.pack_start(box_git, False, False, 0)
 
-        # Botão de Reset Global
         box_reset = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         lbl_r = Gtk.Label(xalign=0)
         lbl_r.set_markup("<b>⚠️ Danger Zone</b>")
@@ -435,14 +471,13 @@ class WayleEngineApp(Gtk.Window):
             self.combo_mode.set_active(0)
             self.scale_interval.set_value(self.default_settings["interval_minutes"])
             self.combo_trans.set_active(TRANSITIONS.index(self.default_settings["transition_type"]))
-            self.scale_delay.set_value(self.default_settings["transition_delay"])
             self.sw_hyde.set_active(self.default_settings["hyde_integration"])
             self.combo_startup.set_active(0)
             self.is_loading_ui = False
             
             self.trigger_save(needs_reload=True)
             self.update_target_selector()
-            self.toggle_view(None) # Volta pra galeria
+            self.toggle_view(None) 
 
     def update_target_selector(self, *args):
         is_shared = self.sw_shared.get_active()
@@ -497,6 +532,19 @@ class WayleEngineApp(Gtk.Window):
 
     def do_save_and_apply(self):
         self.save_timer = None
+        
+        try:
+            with open(SETTINGS_PATH, "r") as f: disk_settings = json.load(f)
+        except:
+            disk_settings = {}
+            
+        if getattr(self, 'wallpapers_dirty', False):
+            final_wallpapers = self.settings.get("fixed_wallpapers", {})
+            self.wallpapers_dirty = False
+        else:
+            final_wallpapers = disk_settings.get("fixed_wallpapers", self.settings.get("fixed_wallpapers", {}))
+            self.settings["fixed_wallpapers"] = final_wallpapers
+
         new_settings = {
             "cycle_enabled": self.sw_cycle.get_active(),
             "interval_minutes": int(self.scale_interval.get_value()),
@@ -504,17 +552,18 @@ class WayleEngineApp(Gtk.Window):
             "mute": self.sw_mute.get_active(),
             "shared_monitors": self.sw_shared.get_active(),
             "videos_path": str(self.videos_dir),
-            "transition_delay": float(self.scale_delay.get_value()),
+            "transition_delay": 2.0, 
             "transition_type": self.combo_trans.get_active_text(),
             "is_paused": self.sw_pause.get_active(),
             "fit_modes": self.settings.get("fit_modes", {}),
-            "fixed_wallpapers": self.settings.get("fixed_wallpapers", {}),
+            "fixed_wallpapers": final_wallpapers, 
             "playback_speed": float(self.scale_speed.get_value()),
             "brightness": int(self.scale_bright.get_value()),
             "force_reload": getattr(self, 'pending_reload', False),
             "active_filter": self.current_filter,
             "hyde_integration": self.sw_hyde.get_active(),
-            "startup_behavior": "clear" if self.combo_startup.get_active() == 1 else "restore"
+            "startup_behavior": "clear" if self.combo_startup.get_active() == 1 else "restore",
+            "favorites": self.settings.get("favorites", [])
         }
         self.pending_reload = False
         
@@ -540,11 +589,9 @@ class WayleEngineApp(Gtk.Window):
         dialog.destroy()
 
     def refresh_gallery(self):
-        # Bloqueia a UI para evitar uso enquanto carrega o filtro
         self.combo_filter.set_sensitive(False)
         self.target_box.set_sensitive(False)
         
-        # Mostra o spinner superior e o grande do meio (se a pasta for grande)
         self.top_loading_box.show_all()
         self.top_spinner.start()
         
@@ -558,7 +605,10 @@ class WayleEngineApp(Gtk.Window):
         all_files = [f for f in self.videos_dir.glob("*.*") if f.suffix.lower() in SUPPORTED]
         
         files = []
-        if "Videos" in self.current_filter:
+        if "Favorites" in self.current_filter:
+            favs = self.settings.get("favorites", [])
+            files = [f for f in all_files if f.name in favs]
+        elif "Videos" in self.current_filter:
             files = [f for f in all_files if f.suffix.lower() in VIDEO_EXTS]
         elif "Images" in self.current_filter:
             files = [f for f in all_files if f.suffix.lower() in IMAGE_EXTS]
@@ -584,6 +634,7 @@ class WayleEngineApp(Gtk.Window):
     def draw_gallery(self, files):
         files_dict = {f.stem: f for f in files}
         thumbs = sorted([t for t in THUMBS_DIR.glob("*.png") if t.stem in files_dict])
+        favorites = self.settings.get("favorites", [])
         
         for t in thumbs:
             original_file = files_dict[t.stem]
@@ -599,10 +650,36 @@ class WayleEngineApp(Gtk.Window):
             except:
                 continue 
             
+            overlay = Gtk.Overlay()
+            overlay.set_halign(Gtk.Align.CENTER) 
+            overlay.set_valign(Gtk.Align.CENTER)
+            overlay.add(img)
+            
+            btn_fav = Gtk.Button()
+            btn_fav.get_style_context().add_class("fav-btn")
+            is_fav = original_file.name in favorites
+            
+            lbl_fav = Gtk.Label()
+            lbl_fav.set_markup(f"<span size='large'>{'❤️' if is_fav else '🤍'}</span>")
+            btn_fav.add(lbl_fav)
+            
+            btn_fav.set_halign(Gtk.Align.END)
+            btn_fav.set_valign(Gtk.Align.START)
+            
+            btn_fav.set_margin_top(4) 
+            btn_fav.set_margin_end(4) 
+            btn_fav.set_opacity(0.85)
+            
+            btn_fav.connect("clicked", self.toggle_favorite, original_file.name, lbl_fav)
+            
+            overlay.add_overlay(btn_fav)
+            overlay.show_all()
+            
             lbl = Gtk.Label(label=f"{badge} {t.stem[:15]}...", margin_top=5)
             
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-            box.pack_start(img, False, False, 0)
+            box.set_halign(Gtk.Align.CENTER)
+            box.pack_start(overlay, False, False, 0)
             box.pack_start(lbl, False, False, 0)
             
             btn = Gtk.Button()
@@ -616,12 +693,25 @@ class WayleEngineApp(Gtk.Window):
         self.finish_loading("")
         return False
 
+    def toggle_favorite(self, btn, file_name, lbl_fav):
+        favorites = self.settings.get("favorites", [])
+        if file_name in favorites:
+            favorites.remove(file_name)
+            lbl_fav.set_markup("<span size='large'>🤍</span>")
+        else:
+            favorites.append(file_name)
+            lbl_fav.set_markup("<span size='large'>❤️</span>")
+        
+        self.settings["favorites"] = favorites
+        self.trigger_save(needs_reload=False)
+        
+        if "Favorites" in self.current_filter:
+            self.refresh_gallery()
+
     def finish_loading(self, text):
-        # Desbloqueia a UI
         self.combo_filter.set_sensitive(True)
         self.target_box.set_sensitive(True)
         
-        # Oculta spinners
         self.top_spinner.stop()
         self.top_loading_box.hide()
         self.loading_spinner.stop()
@@ -635,15 +725,22 @@ class WayleEngineApp(Gtk.Window):
 
     def on_image_click(self, btn, file_path):
         active_target = self.get_active_target()
-        fixed = self.settings.get("fixed_wallpapers", {})
         
+        try:
+            with open(SETTINGS_PATH, "r") as f: disk_settings = json.load(f)
+            fixed = disk_settings.get("fixed_wallpapers", {})
+        except:
+            fixed = self.settings.get("fixed_wallpapers", {})
+            
         if self.sw_shared.get_active(): fixed["all"] = file_path
         else: fixed[active_target] = file_path
 
         self.settings["fixed_wallpapers"] = fixed
+        self.wallpapers_dirty = True
         self.trigger_save(needs_reload=True) 
 
 if __name__ == "__main__":
+    acquire_single_instance_lock()
     app = WayleEngineApp()
     app.connect("destroy", Gtk.main_quit)
     app.show_all()

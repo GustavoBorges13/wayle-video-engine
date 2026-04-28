@@ -55,7 +55,8 @@ def load_settings():
         "force_reload": False,
         "active_filter": "All Wallpapers",
         "hyde_integration": True,
-        "startup_behavior": "restore"
+        "startup_behavior": "restore",
+        "favorites": []
     }
     if SETTINGS_PATH.exists():
         try:
@@ -135,7 +136,6 @@ def resolve_fit_mode(fit_preference, file_path, mon_name):
 def generate_thumbnail(file_path):
     thumb_path = THUMBS_DIR / f"{file_path.stem}.png"
     if not thumb_path.exists():
-        print(f"[DEBUG] Generating thumbnail for {file_path.name}...", flush=True)
         cmd = [
             "ffmpeg",
             "-y",
@@ -160,6 +160,7 @@ def update_wayle_toml(monitor_file_dict, monitor_thumb_dict, cfg, force_transiti
         with open(TOML_PATH, "r") as f:
             doc = tomlkit.load(f)
         doc["wallpaper"]["cycling-enabled"] = False
+        
         doc["wallpaper"]["transition-type"] = (
             force_transition if force_transition else cfg["transition_type"]
         )
@@ -191,7 +192,6 @@ def kill_mpvpaper():
     os.system("killall -q mpvpaper")
 
 
-# ================= FIX: AMBIENTE GLOBAL =================
 def get_dynamic_env():
     dynamic_env = os.environ.copy()
     try:
@@ -202,10 +202,9 @@ def get_dynamic_env():
             if "=" in line:
                 key, val = line.split("=", 1)
                 dynamic_env[key] = val
-    except Exception as e:
-        print(f"[DEBUG] Could not fetch systemd environment: {e}", flush=True)
+    except:
+        pass
     return dynamic_env
-# ========================================================
 
 
 def start_mpvpaper(monitor_video_dict, cfg):
@@ -236,18 +235,12 @@ def start_mpvpaper(monitor_video_dict, cfg):
                 )
                 mpvpaper_processes.append(proc)
             except Exception as e:
-                print(f"[ERROR] Failed to start mpvpaper: {e}", flush=True)
+                pass
 
 
-def delayed_mpv_start(monitor_file_dict, cfg, expected_id):
-    time.sleep(float(cfg.get("transition_delay", 2.0)))
-    if current_transition_id == expected_id:
-        start_mpvpaper(monitor_file_dict, cfg)
-
-
-def execute_hyde_integration(img_path, cfg):
+def execute_hyde_integration(original_file_path, cfg):
+    # Passes the ORIGINAL file (video, gif, or image) directly to HyDE.
     if not cfg.get("hyde_integration", True):
-        print("[DEBUG] HyDE integration is DISABLED in settings.", flush=True)
         return
 
     wall_sh = shutil.which("wallpaper.sh")
@@ -257,23 +250,32 @@ def execute_hyde_integration(img_path, cfg):
             wall_sh = str(fallback)
 
     if not wall_sh:
-        print("[DEBUG] wallpaper.sh NOT FOUND in system. Skipping HyDE integration.", flush=True)
         return
 
-    print(f"[DEBUG] HyDE wallpaper.sh detected! Injecting thumbnail...", flush=True)
     env = get_dynamic_env()
-    
     try:
-        cmd = [wall_sh, "-s", str(img_path), "-b", "awww", "-G"]
-        print(f"[DEBUG] Executing: {' '.join(cmd)}", flush=True)
-        result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+        # The secret sauce: '-b none'. 
+        # This forces HyDE to update the cache (wall.set) for reboot restorations 
+        # and extract Wallbash colors natively, but it aborts before trying to 
+        # launch an animation backend, preventing conflicts with Wayle/Mpvpaper.
+        cmd = [wall_sh, "-s", str(original_file_path), "-b", "none"]
+        subprocess.run(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except:
+        pass
+
+
+def post_transition_tasks(monitor_file_dict, cfg, expected_id, original_file, has_video):
+    # Wait for the Wayle custom transition (like grow/wipe) to finish completely
+    time.sleep(float(cfg.get("transition_delay", 2.0)))
+    
+    if current_transition_id == expected_id:
+        # Start the video playback on top of everything
+        if has_video and not cfg["is_paused"]:
+            start_mpvpaper(monitor_file_dict, cfg)
         
-        if result.returncode != 0:
-            print(f"[ERROR] HyDE apply failed with exit code {result.returncode}!", flush=True)
-        else:
-            print(f"[DEBUG] HyDE applied successfully! Colors, Cache, and Wallpaper updated.", flush=True)
-    except Exception as e:
-        print(f"[ERROR] Exception occurred while running HyDE integration: {e}", flush=True)
+        # Finally, call HyDE passing the ORIGINAL video file to ensure
+        # the system caches the correct extension for the next reboot.
+        execute_hyde_integration(original_file, cfg)
 
 
 def apply_wallpapers(monitor_file_dict, cfg):
@@ -292,17 +294,18 @@ def apply_wallpapers(monitor_file_dict, cfg):
         else:
             monitor_thumb_dict[mon] = file_path
 
-    primary_img = list(monitor_thumb_dict.values())[0]
-    execute_hyde_integration(primary_img, cfg)
-
+    # 1. Start the main transition exclusively through Wayle TOML
     update_wayle_toml(monitor_file_dict, monitor_thumb_dict, cfg)
+    
+    # Extract the original file path (NOT the thumbnail) to send to HyDE
+    original_file = list(monitor_file_dict.values())[0]
 
-    if has_video and not cfg["is_paused"]:
-        threading.Thread(
-            target=delayed_mpv_start,
-            args=(monitor_file_dict, cfg, current_transition_id),
-            daemon=True,
-        ).start()
+    # 2. Spin off a background thread to wait and start video & HyDE safely
+    threading.Thread(
+        target=post_transition_tasks,
+        args=(monitor_file_dict, cfg, current_transition_id, original_file, has_video),
+        daemon=True,
+    ).start()
 
 
 def handle_pause(cfg):
@@ -315,11 +318,11 @@ def handle_pause(cfg):
         else:
             paused_imgs[mon] = file_path
             
-    primary_img = list(paused_imgs.values())[0]
-    execute_hyde_integration(primary_img, cfg)
-
     update_wayle_toml(current_playing_dict, paused_imgs, cfg, force_transition="simple")
     kill_mpvpaper()
+    
+    original_file = list(current_playing_dict.values())[0]
+    threading.Thread(target=execute_hyde_integration, args=(original_file, cfg), daemon=True).start()
 
 
 def main_loop():
@@ -329,11 +332,8 @@ def main_loop():
     last_cfg = load_settings()
     
     if last_cfg.get("startup_behavior") == "clear":
-        print("[*] Clearing wallpaper on startup as requested...", flush=True)
         os.system("swww clear")
         os.system("awww clear")
-    else:
-        print("[*] Startup behavior: Restoring last wallpaper...", flush=True)
 
     was_paused = last_cfg["is_paused"]
     time_elapsed = 0
@@ -350,10 +350,12 @@ def main_loop():
                 time.sleep(1)
                 continue
                 
-            # AQUI: A MÁGICA DO FILTRO APLICADA AO CICLO
             active_filter = cfg.get("active_filter", "All Wallpapers")
             cycle_files = []
-            if "Videos" in active_filter:
+            if "Favorites" in active_filter:
+                favs = cfg.get("favorites", [])
+                cycle_files = [f for f in all_files if f.name in favs]
+            elif "Videos" in active_filter:
                 cycle_files = [f for f in all_files if f.suffix.lower() in VIDEO_EXTS]
             elif "Images" in active_filter:
                 cycle_files = [f for f in all_files if f.suffix.lower() in IMAGE_EXTS]
@@ -362,12 +364,10 @@ def main_loop():
             else:
                 cycle_files = all_files
             
-            # Se o filtro ficar vazio (ex: Filtrou pra vídeo mas a pasta só tem imagem), usa tudo
             if not cycle_files:
                 cycle_files = all_files
 
             if cfg["cycle_enabled"] and not was_cycle_enabled:
-                print("[DEBUG] Cycle enabled! Resetting timer...", flush=True)
                 time_elapsed = 0
             was_cycle_enabled = cfg["cycle_enabled"]
 
@@ -379,9 +379,7 @@ def main_loop():
                         monitor_file_dict[m] = vid
                 else:
                     for m in MONITORS:
-                        monitor_file_dict[m] = Path(
-                            cfg["fixed_wallpapers"].get(m, all_files[0])
-                        )
+                        monitor_file_dict[m] = Path(cfg["fixed_wallpapers"].get(m, all_files[0]))
 
                 if cfg["is_paused"]:
                     current_playing_dict = monitor_file_dict
@@ -397,18 +395,18 @@ def main_loop():
                 was_paused = False
 
             needs_visual_reload = False
+            action_taken = False 
 
             if cfg.get("force_reload", False):
                 needs_visual_reload = True
                 clear_flags(cfg)
-                time_elapsed = 0
-
             elif (
                 cfg["fit_modes"] != last_cfg.get("fit_modes", {})
                 or cfg["playback_speed"] != last_cfg.get("playback_speed")
                 or cfg["brightness"] != last_cfg.get("brightness")
                 or cfg["mute"] != last_cfg.get("mute")
                 or cfg["fixed_wallpapers"] != last_cfg.get("fixed_wallpapers", {})
+                or cfg["shared_monitors"] != last_cfg.get("shared_monitors")
             ):
                 needs_visual_reload = True
 
@@ -420,17 +418,27 @@ def main_loop():
                         monitor_file_dict[m] = vid
                 else:
                     for m in MONITORS:
-                        monitor_file_dict[m] = Path(
-                            cfg["fixed_wallpapers"].get(m, all_files[0])
-                        )
+                        monitor_file_dict[m] = Path(cfg["fixed_wallpapers"].get(m, all_files[0]))
 
                 if cfg["is_paused"]:
                     current_playing_dict = monitor_file_dict
                     handle_pause(cfg)
                 else:
                     apply_wallpapers(monitor_file_dict, cfg)
+                
+                action_taken = True
+                time_elapsed = 0 
 
-            if (
+            if not action_taken and cfg["cycle_enabled"] and current_playing_dict and cycle_files:
+                is_out_of_scope = False
+                for m in MONITORS:
+                    if current_playing_dict.get(m) not in cycle_files:
+                        is_out_of_scope = True
+                        break
+                if is_out_of_scope:
+                    time_elapsed = cfg["interval_minutes"] * 60 
+
+            if not action_taken and (
                 not cfg["is_paused"]
                 and cfg["cycle_enabled"]
                 and time_elapsed >= (cfg["interval_minutes"] * 60)
@@ -438,7 +446,7 @@ def main_loop():
                 monitor_file_dict = {}
                 if cfg["shared_monitors"]:
                     if cfg["cycle_mode"] == "shuffle":
-                        vid = random.choice(cycle_files) # AGORA USA O ARRAY FILTRADO
+                        vid = random.choice(cycle_files) 
                     else:
                         cycle_files.sort()
                         vid = cycle_files[last_index % len(cycle_files)]
@@ -447,10 +455,9 @@ def main_loop():
                         monitor_file_dict[m] = vid
                 else:
                     for m in MONITORS:
-                        monitor_file_dict[m] = random.choice(cycle_files) # AGORA USA O ARRAY FILTRADO
+                        monitor_file_dict[m] = random.choice(cycle_files) 
 
                 if monitor_file_dict != current_playing_dict:
-
                     fixed = cfg.get("fixed_wallpapers", {})
                     if cfg["shared_monitors"]:
                         fixed["all"] = str(monitor_file_dict[MONITORS[0]])
@@ -478,6 +485,6 @@ def main_loop():
 
 
 if __name__ == "__main__":
-    time.sleep(2) # Delay intocável de segurança do Boot
+    time.sleep(2)
     try: main_loop()
     except KeyboardInterrupt: kill_mpvpaper()
