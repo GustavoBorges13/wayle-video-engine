@@ -6,11 +6,17 @@ This software fills the gap for video wallpapers in Hyprland, behaving similarly
 
 ## 🎥 Demonstrations & Performance
 
-**Video 1:** Testing `.mp4` video wallpaper changes (powered by `mpvpaper`).
+**Main Showcase:** Complete overview of the native GUI, Favorites System, and seamless transitions in action.
+
+https://github.com/user-attachments/assets/94b17870-568e-4cb1-ae6c-c2d61ccdac10
+
+---
+
+**Performance Test 1:** Testing `.mp4` video wallpaper changes (powered by `mpvpaper`).
 
 https://github.com/user-attachments/assets/c735c6bf-0a44-4ffd-992a-f699002a6953
 
-**Video 2:** Testing static images and `.gif` wallpaper changes (handled natively by `awww`).
+**Performance Test 2:** Testing static images and `.gif` wallpaper changes (handled natively by `awww`).
 
 https://github.com/user-attachments/assets/3cb023e5-803c-4c46-9796-49fbe1e2f90e
 
@@ -23,8 +29,8 @@ By default, the Wayland ecosystem and Wayle do not accept `.mp4` video files nat
 
 The **Wayle Video Engine** acts as an interceptor to overcome this limitation:
 1. It automatically generates a high-quality, full-resolution thumbnail of your video's first frame using `ffmpeg`.
-2. It injects this thumbnail into Wayle's `runtime.toml`, triggering `awww` to perform a smooth "Fade/Transition" animation.
-3. After the transition animation is complete (timed by the *Transition Delay* slider), it spins up `mpvpaper` seamlessly directly on top of that static image.
+2. It injects this thumbnail into Wayle's `runtime.toml`, triggering `awww` to perform a smooth native animation.
+3. After the transition animation is complete, it spins up `mpvpaper` seamlessly directly on top of that static image.
 
 The visual result is a flawless experience without tearing or black flickers between video loops or background changes.
 
@@ -35,7 +41,7 @@ The visual result is a flawless experience without tearing or black flickers bet
 * **Independent Monitors:** Link the same video across all screens, or select different wallpapers and scaling settings for each individual monitor.
 * **Native Mpv Engine:** Adjust brightness and video speed (slow-motion) directly from the GUI in real-time.
 * **Smooth Transitions:** Leverages the `wayle/awww` engine to fade between wallpapers natively.
-* **Auto-Save & Debounce:** Settings apply instantly without "Apply" buttons, optimized to prevent flickering.
+* **Auto-Save & Queue Protector:** Settings apply instantly without "Apply" buttons. The background daemon is heavily optimized against spam-clicks to prevent race conditions.
 
 ---
 
@@ -43,11 +49,9 @@ The visual result is a flawless experience without tearing or black flickers bet
 If you enable HyDE Integration in the settings, the engine will attempt to link with HyDE's `wallpaper.sh`. 
 
 Whenever you pick a video wallpaper:
-1. The engine extracts the high-quality first frame.
-2. It sends it directly to HyDE.
-3. HyDE uses **Wallbash** to read the dominant colors of that specific video frame and themes your entire system (terminal, borders, bars) instantly based on the video you just launched!
-
-⚠️ **Disclaimer:** The HyDE / Wallbash integration is highly experimental and has not been thoroughly tested under all setups yet. It may cause unexpected CPU spikes or fail to apply colors depending on your HyDE version. Use it with caution.
+1. The engine sends the file directly to HyDE without interrupting the Wayland transition (`-b none` integration).
+2. HyDE uses **Wallbash** to read the dominant colors of that specific video and themes your entire system (terminal, borders, bars) instantly.
+3. The wallpaper is safely cached in HyDE's native memory, ensuring your video wallpaper restores perfectly on the next system boot.
 
 ---
 
@@ -56,7 +60,7 @@ Being tailored for Arch Linux and Hyprland, it relies on:
 * `wayle` (and `awww`)
 * `mpvpaper`
 * `ffmpeg` (for generating high-quality thumbnails)
-* `python-gobject` and `gtk3` (For the GUI)
+* `python-gobject` and `gtk3` (For the native GUI)
 
 ## 🚀 Installation
 
