@@ -28,6 +28,9 @@ current_playing_dict = {}
 mpvpaper_processes = []
 current_transition_id = 0
 
+# GLOBAL LOCK FOR QUEUE MANAGEMENT
+is_transitioning = False
+
 
 def sig_handler(signum, frame):
     kill_mpvpaper()
@@ -45,7 +48,6 @@ def load_settings():
         "mute": True,
         "shared_monitors": True,
         "videos_path": str(DEFAULT_VIDEOS_DIR),
-        "transition_delay": 2.0,
         "transition_type": "fade",
         "is_paused": False,
         "fit_modes": {},
@@ -239,7 +241,6 @@ def start_mpvpaper(monitor_video_dict, cfg):
 
 
 def execute_hyde_integration(original_file_path, cfg):
-    # Passes the ORIGINAL file (video, gif, or image) directly to HyDE.
     if not cfg.get("hyde_integration", True):
         return
 
@@ -254,10 +255,6 @@ def execute_hyde_integration(original_file_path, cfg):
 
     env = get_dynamic_env()
     try:
-        # The secret sauce: '-b none'. 
-        # This forces HyDE to update the cache (wall.set) for reboot restorations 
-        # and extract Wallbash colors natively, but it aborts before trying to 
-        # launch an animation backend, preventing conflicts with Wayle/Mpvpaper.
         cmd = [wall_sh, "-s", str(original_file_path), "-b", "none"]
         subprocess.run(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except:
@@ -265,26 +262,35 @@ def execute_hyde_integration(original_file_path, cfg):
 
 
 def post_transition_tasks(monitor_file_dict, cfg, expected_id, original_file, has_video):
-    # Wait for the Wayle custom transition (like grow/wipe) to finish completely
-    time.sleep(float(cfg.get("transition_delay", 2.0)))
-    
-    if current_transition_id == expected_id:
-        # Start the video playback on top of everything
-        if has_video and not cfg["is_paused"]:
-            start_mpvpaper(monitor_file_dict, cfg)
+    global is_transitioning
+    try:
+        # Wait for the Wayle custom transition (like grow/wipe) to finish completely
+        # Delay is hardcoded to 2.0s since we removed it from the UI.
+        time.sleep(2.0)
         
-        # Finally, call HyDE passing the ORIGINAL video file to ensure
-        # the system caches the correct extension for the next reboot.
-        execute_hyde_integration(original_file, cfg)
+        if current_transition_id == expected_id:
+            # Start the video playback on top of everything
+            if has_video and not cfg["is_paused"]:
+                start_mpvpaper(monitor_file_dict, cfg)
+            
+            # Call HyDE passing the ORIGINAL video file
+            execute_hyde_integration(original_file, cfg)
+    finally:
+        # Release the lock so the daemon can process queued spam clicks
+        is_transitioning = False
 
 
 def apply_wallpapers(monitor_file_dict, cfg):
-    global current_playing_dict, current_transition_id
+    global current_playing_dict, current_transition_id, is_transitioning
     current_playing_dict = monitor_file_dict
     monitor_thumb_dict = {}
     has_video = False
 
     current_transition_id = time.time()
+    
+    # LOCK THE DAEMON ENGINE to queue future rapid clicks
+    is_transitioning = True 
+
     kill_mpvpaper()
 
     for mon, file_path in monitor_file_dict.items():
@@ -294,13 +300,12 @@ def apply_wallpapers(monitor_file_dict, cfg):
         else:
             monitor_thumb_dict[mon] = file_path
 
-    # 1. Start the main transition exclusively through Wayle TOML
+    # Start the main transition exclusively through Wayle TOML
     update_wayle_toml(monitor_file_dict, monitor_thumb_dict, cfg)
     
-    # Extract the original file path (NOT the thumbnail) to send to HyDE
     original_file = list(monitor_file_dict.values())[0]
 
-    # 2. Spin off a background thread to wait and start video & HyDE safely
+    # Spin off a background thread to wait and start video safely
     threading.Thread(
         target=post_transition_tasks,
         args=(monitor_file_dict, cfg, current_transition_id, original_file, has_video),
@@ -342,6 +347,16 @@ def main_loop():
 
     while True:
         try:
+            # ========================================================
+            # QUEUE / RACE CONDITION PROTECTOR
+            # If a transition is currently running, pause the loop here.
+            # This ensures we don't spam 'awww'. Once the 2.0s transition
+            # finishes, the loop resumes, reads the JSON, and seamlessly
+            # applies the *latest* clicked wallpaper.
+            # ========================================================
+            while is_transitioning:
+                time.sleep(0.5)
+
             cfg = load_settings()
             videos_dir = Path(cfg["videos_path"])
             all_files = [f for f in videos_dir.glob("*.*") if f.suffix.lower() in ALL_SUPPORTED]
