@@ -188,11 +188,10 @@ def kill_mpvpaper():
     for proc in mpvpaper_processes:
         try:
             proc.terminate()
+            proc.wait(timeout=2)
         except:
-            pass
+            proc.kill()
     mpvpaper_processes = []
-    os.system("killall -q mpvpaper")
-
 
 def get_dynamic_env():
     dynamic_env = os.environ.copy()
