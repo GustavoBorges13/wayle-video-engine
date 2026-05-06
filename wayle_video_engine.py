@@ -192,6 +192,9 @@ def kill_mpvpaper():
         except:
             proc.kill()
     mpvpaper_processes = []
+    # Fallback de segurança: mata qualquer mpvpaper zumbi que o Python tenha perdido de vista
+    os.system("killall -q mpvpaper")
+
 
 def get_dynamic_env():
     dynamic_env = os.environ.copy()
@@ -220,7 +223,13 @@ def start_mpvpaper(monitor_video_dict, cfg):
                 pref = cfg["fit_modes"].get(mon, "fill")
                 actual_mode = resolve_fit_mode(pref, file_path, mon)
 
-                mpv_options = f"loop {audio_flag} --hwdec=auto"
+                # =============================================================
+                # FIX DO MEMORY LEAK: 
+                # --cache=no desliga o cache na RAM (seguro para arquivos locais)
+                # --demuxer-max-bytes=50M cria um teto rígido de 50MB caso o cache falhe
+                # =============================================================
+                mpv_options = f"loop {audio_flag} --hwdec=auto --cache=no --demuxer-max-bytes=50M"
+                
                 if actual_mode == "fill":
                     mpv_options += " --panscan=1.0"
 
@@ -236,10 +245,10 @@ def start_mpvpaper(monitor_video_dict, cfg):
                 )
                 mpvpaper_processes.append(proc)
             except Exception as e:
-                pass
+                print(f"[ERROR] Failed to start mpvpaper: {e}", flush=True)
 
 
-def execute_hyde_integration(original_file_path, cfg):
+def execute_hyde_integration(img_path, cfg):
     if not cfg.get("hyde_integration", True):
         return
 
@@ -254,28 +263,26 @@ def execute_hyde_integration(original_file_path, cfg):
 
     env = get_dynamic_env()
     try:
-        cmd = [wall_sh, "-s", str(original_file_path), "-b", "none"]
+        # AQUI ESTÁ A CORREÇÃO:
+        # Passamos a imagem (.png), com backend awww, e a flag -G (Global) para salvar pro BOOT!
+        cmd = [wall_sh, "-s", str(img_path), "-b", "awww", "-G"]
         subprocess.run(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except:
         pass
 
 
-def post_transition_tasks(monitor_file_dict, cfg, expected_id, original_file, has_video):
+def post_transition_tasks(monitor_file_dict, cfg, expected_id, primary_img, has_video):
     global is_transitioning
     try:
-        # Wait for the Wayle custom transition (like grow/wipe) to finish completely
-        # Delay is hardcoded to 2.0s since we removed it from the UI.
         time.sleep(2.0)
         
         if current_transition_id == expected_id:
-            # Start the video playback on top of everything
             if has_video and not cfg["is_paused"]:
                 start_mpvpaper(monitor_file_dict, cfg)
             
-            # Call HyDE passing the ORIGINAL video file
-            execute_hyde_integration(original_file, cfg)
+            # Chama o HyDE passando a Thumbnail (.png)
+            execute_hyde_integration(primary_img, cfg)
     finally:
-        # Release the lock so the daemon can process queued spam clicks
         is_transitioning = False
 
 
@@ -286,8 +293,6 @@ def apply_wallpapers(monitor_file_dict, cfg):
     has_video = False
 
     current_transition_id = time.time()
-    
-    # LOCK THE DAEMON ENGINE to queue future rapid clicks
     is_transitioning = True 
 
     kill_mpvpaper()
@@ -299,15 +304,14 @@ def apply_wallpapers(monitor_file_dict, cfg):
         else:
             monitor_thumb_dict[mon] = file_path
 
-    # Start the main transition exclusively through Wayle TOML
     update_wayle_toml(monitor_file_dict, monitor_thumb_dict, cfg)
     
-    original_file = list(monitor_file_dict.values())[0]
+    # Pega a Thumbnail para mandar pro HyDE
+    primary_img = list(monitor_thumb_dict.values())[0]
 
-    # Spin off a background thread to wait and start video safely
     threading.Thread(
         target=post_transition_tasks,
-        args=(monitor_file_dict, cfg, current_transition_id, original_file, has_video),
+        args=(monitor_file_dict, cfg, current_transition_id, primary_img, has_video),
         daemon=True,
     ).start()
 
@@ -325,8 +329,9 @@ def handle_pause(cfg):
     update_wayle_toml(current_playing_dict, paused_imgs, cfg, force_transition="simple")
     kill_mpvpaper()
     
-    original_file = list(current_playing_dict.values())[0]
-    threading.Thread(target=execute_hyde_integration, args=(original_file, cfg), daemon=True).start()
+    # Pega a Thumbnail e manda pro HyDE
+    primary_img = list(paused_imgs.values())[0]
+    threading.Thread(target=execute_hyde_integration, args=(primary_img, cfg), daemon=True).start()
 
 
 def main_loop():
