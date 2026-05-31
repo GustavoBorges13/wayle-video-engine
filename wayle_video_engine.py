@@ -58,7 +58,8 @@ def load_settings():
         "active_filter": "All Wallpapers",
         "hyde_integration": True,
         "startup_behavior": "restore",
-        "favorites": []
+        "favorites": [],
+        "search_subfolders": False # Adicionado aqui também
     }
     if SETTINGS_PATH.exists():
         try:
@@ -192,7 +193,6 @@ def kill_mpvpaper():
         except:
             proc.kill()
     mpvpaper_processes = []
-    # Fallback de segurança: mata qualquer mpvpaper zumbi que o Python tenha perdido de vista
     os.system("killall -q mpvpaper")
 
 
@@ -223,11 +223,6 @@ def start_mpvpaper(monitor_video_dict, cfg):
                 pref = cfg["fit_modes"].get(mon, "fill")
                 actual_mode = resolve_fit_mode(pref, file_path, mon)
 
-                # =============================================================
-                # FIX DO MEMORY LEAK: 
-                # --cache=no desliga o cache na RAM (seguro para arquivos locais)
-                # --demuxer-max-bytes=50M cria um teto rígido de 50MB caso o cache falhe
-                # =============================================================
                 mpv_options = f"loop {audio_flag} --hwdec=auto --cache=no --demuxer-max-bytes=50M"
                 
                 if actual_mode == "fill":
@@ -263,8 +258,6 @@ def execute_hyde_integration(img_path, cfg):
 
     env = get_dynamic_env()
     try:
-        # AQUI ESTÁ A CORREÇÃO:
-        # Passamos a imagem (.png), com backend awww, e a flag -G (Global) para salvar pro BOOT!
         cmd = [wall_sh, "-s", str(img_path), "-b", "awww", "-G"]
         subprocess.run(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except:
@@ -280,7 +273,6 @@ def post_transition_tasks(monitor_file_dict, cfg, expected_id, primary_img, has_
             if has_video and not cfg["is_paused"]:
                 start_mpvpaper(monitor_file_dict, cfg)
             
-            # Chama o HyDE passando a Thumbnail (.png)
             execute_hyde_integration(primary_img, cfg)
     finally:
         is_transitioning = False
@@ -305,8 +297,6 @@ def apply_wallpapers(monitor_file_dict, cfg):
             monitor_thumb_dict[mon] = file_path
 
     update_wayle_toml(monitor_file_dict, monitor_thumb_dict, cfg)
-    
-    # Pega a Thumbnail para mandar pro HyDE
     primary_img = list(monitor_thumb_dict.values())[0]
 
     threading.Thread(
@@ -329,7 +319,6 @@ def handle_pause(cfg):
     update_wayle_toml(current_playing_dict, paused_imgs, cfg, force_transition="simple")
     kill_mpvpaper()
     
-    # Pega a Thumbnail e manda pro HyDE
     primary_img = list(paused_imgs.values())[0]
     threading.Thread(target=execute_hyde_integration, args=(primary_img, cfg), daemon=True).start()
 
@@ -351,19 +340,18 @@ def main_loop():
 
     while True:
         try:
-            # ========================================================
-            # QUEUE / RACE CONDITION PROTECTOR
-            # If a transition is currently running, pause the loop here.
-            # This ensures we don't spam 'awww'. Once the 2.0s transition
-            # finishes, the loop resumes, reads the JSON, and seamlessly
-            # applies the *latest* clicked wallpaper.
-            # ========================================================
             while is_transitioning:
                 time.sleep(0.5)
 
             cfg = load_settings()
             videos_dir = Path(cfg["videos_path"])
-            all_files = [f for f in videos_dir.glob("*.*") if f.suffix.lower() in ALL_SUPPORTED]
+            
+            # =============== NOVA LÓGICA DE BUSCA ===============
+            if cfg.get("search_subfolders", False):
+                all_files = [f for f in videos_dir.rglob("*.*") if f.suffix.lower() in ALL_SUPPORTED]
+            else:
+                all_files = [f for f in videos_dir.glob("*.*") if f.suffix.lower() in ALL_SUPPORTED]
+            # ====================================================
 
             if not all_files:
                 time.sleep(1)

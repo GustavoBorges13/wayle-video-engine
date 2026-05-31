@@ -50,6 +50,7 @@ class WayleEngineApp(Gtk.Window):
         self.save_timer = None
         self.pending_reload = False 
         self.wallpapers_dirty = False 
+        self.current_load_id = 0 # Previne bugs se o usuário clicar rápido nas categorias
         
         self.settings = self.load_settings()
         self.current_filter = self.settings.get("active_filter", "All Wallpapers")
@@ -94,26 +95,19 @@ class WayleEngineApp(Gtk.Window):
         css = b"""
         button.fav-btn {
             background: transparent;
-            background-color: transparent;
-            background-image: none;
             border: none;
             box-shadow: none;
             text-shadow: 0px 0px 5px rgba(0, 0, 0, 1.0);
             padding: 2px;
         }
-        button.fav-btn:hover {
+        button.fav-btn:hover, button.fav-btn:active {
             background: transparent;
-            background-color: transparent;
-            background-image: none;
             border: none;
             box-shadow: none;
         }
-        button.fav-btn:active {
-            background: transparent;
-            background-color: transparent;
-            background-image: none;
-            border: none;
-            box-shadow: none;
+        .loading-overlay {
+            background-color: rgba(0, 0, 0, 0.75);
+            border-radius: 10px;
         }
         """
         style_provider = Gtk.CssProvider()
@@ -137,7 +131,8 @@ class WayleEngineApp(Gtk.Window):
             "transition_delay": 2.0, "transition_type": "fade", "is_paused": False, 
             "fit_modes": {}, "fixed_wallpapers": {}, "playback_speed": 1.0, "brightness": 0,
             "force_reload": False, "active_filter": "All Wallpapers",
-            "hyde_integration": True, "startup_behavior": "restore", "favorites": []
+            "hyde_integration": True, "startup_behavior": "restore", "favorites": [],
+            "search_subfolders": False # Nova configuração
         }
         if SETTINGS_PATH.exists():
             try:
@@ -172,7 +167,6 @@ class WayleEngineApp(Gtk.Window):
             def check_diff(w, param): btn_reset.set_visible(w.get_active() != default_val)
             widget.connect("notify::active", check_diff)
             check_diff(widget, None)
-
             box.pack_start(btn_reset, False, False, 0)
             
         self.sidebar_box.pack_start(box, False, False, 0)
@@ -208,7 +202,7 @@ class WayleEngineApp(Gtk.Window):
 
     # ================= SIDEBAR =================
     def create_sidebar(self):
-        self.create_title("🖥️ Displays &amp; Layout")
+        self.create_title("🖥️ Displays & Layout")
         
         self.sw_shared = Gtk.Switch(active=self.settings["shared_monitors"])
         self.sw_shared.connect("notify::active", self.on_setting_changed_silent)
@@ -241,7 +235,7 @@ class WayleEngineApp(Gtk.Window):
         self.scale_bright.connect("value-changed", self.on_setting_changed_silent) 
         self.add_sidebar_control("Brightness:", self.scale_bright, self.default_settings["brightness"])
 
-        self.create_title("🔄 Cycle &amp; Transition")
+        self.create_title("🔄 Cycle & Transition")
 
         self.sw_cycle = Gtk.Switch(active=self.settings["cycle_enabled"])
         self.sw_cycle.connect("notify::active", self.on_setting_changed_silent)
@@ -294,12 +288,6 @@ class WayleEngineApp(Gtk.Window):
         self.combo_filter.connect("changed", self.on_filter_changed)
         filter_box.pack_start(self.combo_filter, False, False, 0)
 
-        self.top_loading_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
-        self.top_spinner = Gtk.Spinner()
-        self.top_loading_box.pack_start(self.top_spinner, False, False, 0)
-        self.top_loading_box.pack_start(Gtk.Label(label="Processing..."), False, False, 0)
-        self.top_loading_box.set_no_show_all(True)
-
         top_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         top_bar.set_margin_top(10)
         top_bar.set_margin_bottom(10)
@@ -307,8 +295,6 @@ class WayleEngineApp(Gtk.Window):
         top_bar.set_margin_end(10)
         
         top_bar.pack_start(self.target_box, False, False, 0)
-        top_bar.pack_start(Gtk.Label(), True, True, 0) 
-        top_bar.pack_start(self.top_loading_box, False, False, 0) 
         top_bar.pack_start(Gtk.Label(), True, True, 0) 
         top_bar.pack_start(filter_box, False, False, 0)
 
@@ -328,18 +314,29 @@ class WayleEngineApp(Gtk.Window):
         scroll.add(self.flowbox)
         vbox.pack_start(scroll, True, True, 0)
 
+        # Loading Overlay (Tela escura de carregamento)
+        self.loading_overlay_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.loading_overlay_box.set_halign(Gtk.Align.FILL)
+        self.loading_overlay_box.set_valign(Gtk.Align.FILL)
+        self.loading_overlay_box.get_style_context().add_class("loading-overlay")
+        
+        center_loading = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=15)
+        center_loading.set_halign(Gtk.Align.CENTER)
+        center_loading.set_valign(Gtk.Align.CENTER)
+        
         self.loading_spinner = Gtk.Spinner()
-        self.loading_spinner.set_size_request(50, 50)
-        self.loading_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        self.loading_box.set_halign(Gtk.Align.CENTER)
-        self.loading_box.set_valign(Gtk.Align.CENTER)
-        self.loading_box.pack_start(self.loading_spinner, False, False, 0)
-        self.loading_label = Gtk.Label(label="Loading library...")
-        self.loading_box.pack_start(self.loading_label, False, False, 0)
+        self.loading_spinner.set_size_request(60, 60)
+        center_loading.pack_start(self.loading_spinner, False, False, 0)
+        
+        self.loading_label = Gtk.Label(label="Scanning files...")
+        self.loading_label.set_markup("<span size='large' weight='bold' color='white'>Scanning files...</span>")
+        center_loading.pack_start(self.loading_label, False, False, 0)
+        
+        self.loading_overlay_box.pack_start(center_loading, True, True, 0)
 
         self.gallery_overlay = Gtk.Overlay()
         self.gallery_overlay.add(vbox)
-        self.gallery_overlay.add_overlay(self.loading_box)
+        self.gallery_overlay.add_overlay(self.loading_overlay_box)
 
         self.stack.add_named(self.gallery_overlay, "gallery")
         self.update_target_selector()
@@ -361,7 +358,7 @@ class WayleEngineApp(Gtk.Window):
         row_hyde = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         self.sw_hyde = Gtk.Switch(active=self.settings.get("hyde_integration", True))
         self.sw_hyde.connect("notify::active", self.on_setting_changed_silent)
-        row_hyde.pack_start(Gtk.Label(label="Enable 'hydectl' Sync (Generates Wallbash colors & saves state)", xalign=0), True, True, 0)
+        row_hyde.pack_start(Gtk.Label(label="Enable 'hydectl' Sync (Generates Wallbash colors)", xalign=0), True, True, 0)
         row_hyde.pack_start(self.sw_hyde, False, False, 0)
         box_hyde.pack_start(row_hyde, False, False, 0)
 
@@ -395,21 +392,26 @@ class WayleEngineApp(Gtk.Window):
         lbl_f = Gtk.Label(xalign=0)
         lbl_f.set_markup("<b>📁 Wallpapers Folder</b>")
         box1.pack_start(lbl_f, False, False, 0)
-        box1.pack_start(self.lbl_folder, False, False, 0)
-        btn_f = Gtk.Button(label="Change Folder")
+        
+        row_folder = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        row_folder.pack_start(self.lbl_folder, False, False, 0)
+        
+        self.sw_subfolders = Gtk.Switch(active=self.settings.get("search_subfolders", False))
+        self.sw_subfolders.connect("notify::active", self.on_subfolder_changed)
+        lbl_sub = Gtk.Label(label="Search in subfolders")
+        lbl_sub.set_margin_start(20)
+        row_folder.pack_start(lbl_sub, False, False, 0)
+        row_folder.pack_start(self.sw_subfolders, False, False, 0)
+        
+        box1.pack_start(row_folder, False, False, 0)
+        
+        btn_f = Gtk.Button(label="Change Main Folder")
         btn_f.set_halign(Gtk.Align.START)
         btn_f.connect("clicked", self.change_folder)
         box1.pack_start(btn_f, False, False, 0)
         vbox.pack_start(box1, False, False, 0)
 
-        make_section("🗄️ Cache &amp; Thumbnails", str(CACHE_DIR), "Clear Cache & Reload", self.clear_cache)
-        
-        box3 = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        lbl_c = Gtk.Label(xalign=0)
-        lbl_c.set_markup("<b>📜 Engine Config File</b>")
-        box3.pack_start(lbl_c, False, False, 0)
-        box3.pack_start(Gtk.Label(label=str(SETTINGS_PATH), xalign=0), False, False, 0)
-        vbox.pack_start(box3, False, False, 0)
+        make_section("🗄️ Cache & Thumbnails", str(CACHE_DIR), "Clear Cache & Reload", self.clear_cache)
         
         box_git = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         lbl_g = Gtk.Label(xalign=0)
@@ -443,13 +445,15 @@ class WayleEngineApp(Gtk.Window):
             self.btn_config.set_label("⚙️ Settings")
             self.sidebar_scrolled.show()
 
+    def on_subfolder_changed(self, switch, gparam):
+        if self.is_loading_ui: return
+        self.trigger_save(needs_reload=True)
+        self.refresh_gallery()
+
     def reset_all_settings(self, btn):
         dialog = Gtk.MessageDialog(
-            transient_for=self,
-            flags=0,
-            message_type=Gtk.MessageType.WARNING,
-            buttons=Gtk.ButtonsType.OK_CANCEL,
-            text="Reset All Settings?"
+            transient_for=self, flags=0, message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.OK_CANCEL, text="Reset All Settings?"
         )
         dialog.format_secondary_text("This will restore all configurations to their default values. Are you sure?")
         response = dialog.run()
@@ -473,11 +477,13 @@ class WayleEngineApp(Gtk.Window):
             self.combo_trans.set_active(TRANSITIONS.index(self.default_settings["transition_type"]))
             self.sw_hyde.set_active(self.default_settings["hyde_integration"])
             self.combo_startup.set_active(0)
+            self.sw_subfolders.set_active(self.default_settings["search_subfolders"])
             self.is_loading_ui = False
             
             self.trigger_save(needs_reload=True)
             self.update_target_selector()
             self.toggle_view(None) 
+            self.refresh_gallery()
 
     def update_target_selector(self, *args):
         is_shared = self.sw_shared.get_active()
@@ -532,7 +538,6 @@ class WayleEngineApp(Gtk.Window):
 
     def do_save_and_apply(self):
         self.save_timer = None
-        
         try:
             with open(SETTINGS_PATH, "r") as f: disk_settings = json.load(f)
         except:
@@ -563,10 +568,10 @@ class WayleEngineApp(Gtk.Window):
             "active_filter": self.current_filter,
             "hyde_integration": self.sw_hyde.get_active(),
             "startup_behavior": "clear" if self.combo_startup.get_active() == 1 else "restore",
-            "favorites": self.settings.get("favorites", [])
+            "favorites": self.settings.get("favorites", []),
+            "search_subfolders": self.sw_subfolders.get_active()
         }
         self.pending_reload = False
-        
         with open(SETTINGS_PATH, "w") as f: json.dump(new_settings, f, indent=4)
         return False
 
@@ -588,22 +593,38 @@ class WayleEngineApp(Gtk.Window):
             self.refresh_gallery()
         dialog.destroy()
 
+    def update_loading_label(self, text):
+        self.loading_label.set_markup(f"<span size='large' weight='bold' color='white'>{text}</span>")
+        return False
+
     def refresh_gallery(self):
+        self.current_load_id += 1  # Invalida threads anteriores
+        load_id = self.current_load_id
+        
         self.combo_filter.set_sensitive(False)
         self.target_box.set_sensitive(False)
         
-        self.top_loading_box.show_all()
-        self.top_spinner.start()
-        
-        for child in self.flowbox.get_children(): self.flowbox.remove(child)
-        self.loading_box.show_all()
+        for child in self.flowbox.get_children(): 
+            self.flowbox.remove(child)
+            
+        self.loading_overlay_box.show_all()
         self.loading_spinner.start()
+        self.update_loading_label("Scanning directory...")
         
-        threading.Thread(target=self.async_load_thumbs, daemon=True).start()
+        threading.Thread(target=self.async_load_thumbs, args=(load_id,), daemon=True).start()
 
-    def async_load_thumbs(self):
-        all_files = [f for f in self.videos_dir.glob("*.*") if f.suffix.lower() in SUPPORTED]
+    def async_load_thumbs(self, load_id):
+        # 1. Search Logic (Recursiva ou Normal)
+        use_rglob = self.settings.get("search_subfolders", False)
         
+        if use_rglob:
+            all_files = [f for f in self.videos_dir.rglob("*.*") if f.suffix.lower() in SUPPORTED]
+        else:
+            all_files = [f for f in self.videos_dir.glob("*.*") if f.suffix.lower() in SUPPORTED]
+            
+        if load_id != self.current_load_id: return
+        
+        # 2. Filtro
         files = []
         if "Favorites" in self.current_filter:
             favs = self.settings.get("favorites", [])
@@ -618,80 +639,92 @@ class WayleEngineApp(Gtk.Window):
             files = all_files
 
         if not files:
-            GLib.idle_add(self.finish_loading, f"No files found for '{self.current_filter}'.")
+            GLib.idle_add(self.finish_loading, f"No files found for '{self.current_filter}'.", load_id)
             return
 
+        # 3. Geração de Thumbnails (com ffmpeg)
         missing = [f for f in files if not (THUMBS_DIR / f"{f.stem}.png").exists()]
         if missing:
-            GLib.idle_add(self.loading_label.set_label, f"Generating {len(missing)} High-Quality thumbnails...")
+            GLib.idle_add(self.update_loading_label, f"Generating {len(missing)} High-Quality thumbnails...")
             for f in missing:
+                if load_id != self.current_load_id: return
                 t = THUMBS_DIR / f"{f.stem}.png"
                 cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(f), "-ss", "00:00:00.000", "-vframes", "1", "-q:v", "2", str(t)]
                 subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
-        GLib.idle_add(self.draw_gallery, files)
-
-    def draw_gallery(self, files):
-        files_dict = {f.stem: f for f in files}
-        thumbs = sorted([t for t in THUMBS_DIR.glob("*.png") if t.stem in files_dict])
+        # 4. Carregamento Progressivo Assíncrono da UI
+        # O resize da imagem (GdkPixbuf) é o que travava a interface. 
+        # Agora ele roda na thread de background.
+        GLib.idle_add(self.update_loading_label, "Building gallery...")
+        
         favorites = self.settings.get("favorites", [])
         
-        for t in thumbs:
-            original_file = files_dict[t.stem]
-            ext = original_file.suffix.lower()
+        for original_file in files:
+            if load_id != self.current_load_id: return
             
-            if ext in VIDEO_EXTS: badge = "🎬"
-            elif ext in GIF_EXTS: badge = "🎞️"
-            else: badge = "🖼️"
-
+            t = THUMBS_DIR / f"{original_file.stem}.png"
+            if not t.exists(): continue
+            
             try:
+                # TRABALHO PESADO: Redimensiona na RAM sem travar a interface
                 pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(t), 180, 101, False)
-                img = Gtk.Image.new_from_pixbuf(pixbuf)
+                is_fav = original_file.name in favorites
+                
+                # Envia apenas a montagem rápida para a Thread Principal
+                GLib.idle_add(self.add_single_thumbnail, original_file, pixbuf, is_fav, load_id)
             except:
                 continue 
-            
-            overlay = Gtk.Overlay()
-            overlay.set_halign(Gtk.Align.CENTER) 
-            overlay.set_valign(Gtk.Align.CENTER)
-            overlay.add(img)
-            
-            btn_fav = Gtk.Button()
-            btn_fav.get_style_context().add_class("fav-btn")
-            is_fav = original_file.name in favorites
-            
-            lbl_fav = Gtk.Label()
-            lbl_fav.set_markup(f"<span size='large'>{'❤️' if is_fav else '🤍'}</span>")
-            btn_fav.add(lbl_fav)
-            
-            btn_fav.set_halign(Gtk.Align.END)
-            btn_fav.set_valign(Gtk.Align.START)
-            
-            btn_fav.set_margin_top(4) 
-            btn_fav.set_margin_end(4) 
-            btn_fav.set_opacity(0.85)
-            
-            btn_fav.connect("clicked", self.toggle_favorite, original_file.name, lbl_fav)
-            
-            overlay.add_overlay(btn_fav)
-            overlay.show_all()
-            
-            lbl = Gtk.Label(label=f"{badge} {t.stem[:15]}...", margin_top=5)
-            
-            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-            box.set_halign(Gtk.Align.CENTER)
-            box.pack_start(overlay, False, False, 0)
-            box.pack_start(lbl, False, False, 0)
-            
-            btn = Gtk.Button()
-            btn.add(box)
-            btn.set_relief(Gtk.ReliefStyle.NONE)
-            btn.connect("clicked", self.on_image_click, str(original_file))
-            
-            self.flowbox.add(btn)
-            
+                
+        GLib.idle_add(self.finish_loading, "", load_id)
+
+    def add_single_thumbnail(self, original_file, pixbuf, is_fav, load_id):
+        if load_id != self.current_load_id: return False
+        
+        ext = original_file.suffix.lower()
+        if ext in VIDEO_EXTS: badge = "🎬"
+        elif ext in GIF_EXTS: badge = "🎞️"
+        else: badge = "🖼️"
+
+        img = Gtk.Image.new_from_pixbuf(pixbuf)
+        
+        overlay = Gtk.Overlay()
+        overlay.set_halign(Gtk.Align.CENTER) 
+        overlay.set_valign(Gtk.Align.CENTER)
+        overlay.add(img)
+        
+        btn_fav = Gtk.Button()
+        btn_fav.get_style_context().add_class("fav-btn")
+        
+        lbl_fav = Gtk.Label()
+        lbl_fav.set_markup(f"<span size='large'>{'❤️' if is_fav else '🤍'}</span>")
+        btn_fav.add(lbl_fav)
+        
+        btn_fav.set_halign(Gtk.Align.END)
+        btn_fav.set_valign(Gtk.Align.START)
+        btn_fav.set_margin_top(4) 
+        btn_fav.set_margin_end(4) 
+        btn_fav.set_opacity(0.85)
+        
+        btn_fav.connect("clicked", self.toggle_favorite, original_file.name, lbl_fav)
+        
+        overlay.add_overlay(btn_fav)
+        overlay.show_all()
+        
+        lbl = Gtk.Label(label=f"{badge} {original_file.stem[:15]}...", margin_top=5)
+        
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.set_halign(Gtk.Align.CENTER)
+        box.pack_start(overlay, False, False, 0)
+        box.pack_start(lbl, False, False, 0)
+        
+        btn = Gtk.Button()
+        btn.add(box)
+        btn.set_relief(Gtk.ReliefStyle.NONE)
+        btn.connect("clicked", self.on_image_click, str(original_file))
+        
+        self.flowbox.add(btn)
         self.flowbox.show_all()
-        self.finish_loading("")
-        return False
+        return False # Remove da fila do idle_add
 
     def toggle_favorite(self, btn, file_name, lbl_fav):
         favorites = self.settings.get("favorites", [])
@@ -708,14 +741,14 @@ class WayleEngineApp(Gtk.Window):
         if "Favorites" in self.current_filter:
             self.refresh_gallery()
 
-    def finish_loading(self, text):
+    def finish_loading(self, text, load_id):
+        if load_id != self.current_load_id: return False
+        
         self.combo_filter.set_sensitive(True)
         self.target_box.set_sensitive(True)
         
-        self.top_spinner.stop()
-        self.top_loading_box.hide()
         self.loading_spinner.stop()
-        self.loading_box.hide()
+        self.loading_overlay_box.hide()
         
         if text:
             lbl = Gtk.Label(label=text)
@@ -725,7 +758,6 @@ class WayleEngineApp(Gtk.Window):
 
     def on_image_click(self, btn, file_path):
         active_target = self.get_active_target()
-        
         try:
             with open(SETTINGS_PATH, "r") as f: disk_settings = json.load(f)
             fixed = disk_settings.get("fixed_wallpapers", {})
